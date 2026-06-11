@@ -1,0 +1,23 @@
+# Claude Code local session/permission state
+.claude/settings.local.json
+.claude/
+
+# Local credentials / config (never commit secrets)
+config.env
+*.env
+!*.example.env
+
+# SSH ControlMaster sockets (if ever created in-tree)
+cm-*
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Logs / temp
+*.log
+*.tmp
+*.tmp.*

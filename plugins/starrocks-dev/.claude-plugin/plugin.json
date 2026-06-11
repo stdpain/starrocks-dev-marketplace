@@ -1,0 +1,10 @@
+{
+  "name": "starrocks-dev",
+  "description": "Drive a remote StarRocks dev host over SSH. Five skills: sr-connect (SSH/dev-env setup + verify), sr-build (compile FE/BE), sr-test (FE/BE/regression tests), sr-deploy (deploy + start/stop cluster, auto-ports), sr-diagnose (locate/reproduce a crash from a stack trace).",
+  "version": "1.0.0",
+  "author": {
+    "name": "stdpain",
+    "email": "stdpain@gmail.com"
+  },
+  "keywords": ["starrocks", "remote-dev", "ssh", "build", "deploy", "fe", "be", "celerdata"]
+}
