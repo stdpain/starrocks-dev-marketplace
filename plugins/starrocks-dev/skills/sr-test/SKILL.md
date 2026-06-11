@@ -8,6 +8,9 @@ Runs StarRocks' test suites on the remote dev host (inside `SR_DOCKER` if set),
 reusing the **sr-connect** connection. Wraps the repo's own runners so flags pass
 straight through.
 
+Prefix `SR_PROFILE=<name>` to run tests in a parallel profile's container/worktree.
+See sr-connect → **Parallel work** (`workspace.sh`).
+
 ## Usage
 
 ```bash

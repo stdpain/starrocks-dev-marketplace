@@ -8,7 +8,27 @@
 
 set -uo pipefail
 
-SR_CFG_DIR="${SR_CFG_DIR:-$HOME/.config/starrocks_dev}"
+# Config layout — profiles enable parallel work.
+#   $SR_CFG_BASE/                         base dir (shared state lives here)
+#   $SR_CFG_BASE/config.env               the DEFAULT profile (SR_PROFILE unset)
+#   $SR_CFG_BASE/profiles/<name>/config.env   a named profile (SR_PROFILE=<name>)
+#   $SR_CFG_BASE/cm-<user>@<host>:<port>  SSH ControlMaster socket(s)
+# Each profile is an INDEPENDENT task — its own container (SR_DOCKER), source
+# worktree (SR_HOST_SRC), deploy dir and ports — so several features can be built
+# and deployed in parallel with `SR_PROFILE=featA bash build.sh` &
+# `SR_PROFILE=featB bash build.sh`. Leaving SR_PROFILE unset uses the default
+# profile exactly as before (backward compatible). The ControlMaster socket stays
+# in the base dir on purpose: it is keyed per host, so parallel profiles targeting
+# the same dev box share one multiplexed SSH connection instead of re-handshaking.
+SR_CFG_BASE="${SR_CFG_BASE:-$HOME/.config/starrocks_dev}"
+mkdir -p "$SR_CFG_BASE"; chmod 700 "$SR_CFG_BASE" 2>/dev/null || true
+if [[ -n "${SR_PROFILE:-}" ]]; then
+  [[ "$SR_PROFILE" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || { printf 'starrocks-dev: invalid SR_PROFILE %q (use letters, digits, . _ -)\n' "$SR_PROFILE" >&2; exit 1; }
+  SR_CFG_DIR="$SR_CFG_BASE/profiles/$SR_PROFILE"
+else
+  SR_CFG_DIR="$SR_CFG_BASE"
+fi
 SR_CFG_FILE="$SR_CFG_DIR/config.env"
 mkdir -p "$SR_CFG_DIR"
 chmod 700 "$SR_CFG_DIR" 2>/dev/null || true
@@ -20,7 +40,7 @@ chmod 700 "$SR_CFG_DIR" 2>/dev/null || true
 if [[ -f "$SR_CFG_FILE" ]]; then
   declare -A _SR_ENV_OVERRIDE=()
   for _k in $(compgen -v | grep '^SR_' || true); do
-    [[ "$_k" == SR_CFG_DIR || "$_k" == SR_CFG_FILE ]] && continue
+    case "$_k" in SR_CFG_DIR|SR_CFG_FILE|SR_CFG_BASE|SR_PROFILE) continue ;; esac
     _SR_ENV_OVERRIDE["$_k"]=1
     printf -v "_SR_VAL_$_k" '%s' "${!_k}"
   done
@@ -50,6 +70,43 @@ SR_NOFILE="${SR_NOFILE:-655350}"
 
 sr_log()  { printf 'starrocks-dev: %s\n' "$*" >&2; }
 sr_die()  { printf 'starrocks-dev: %s\n' "$*" >&2; exit 1; }
+
+# Every documented SR_* config key, in the order written to config.env. Keep in
+# sync with config.env.example. NOTE: SR_PROFILE / SR_CFG_* are NOT here — they
+# select WHICH config file is active and must never be persisted into one.
+SR_CONFIG_KEYS=(
+  # connection
+  SR_HOST SR_USER SR_PORT SR_KEY SR_PROXY_JUMP SR_SRC
+  # docker dev-env
+  SR_DOCKER SR_IMAGE SR_HOST_SRC SR_NOFILE SR_M2 SR_DOCKER_RUN_OPTS
+  # build
+  SR_THIRDPARTY SR_JOBS SR_BUILD_TYPE
+  # deploy
+  SR_DEPLOY_DIR SR_DEPLOY_IN_DOCKER SR_MYSQL_HOST SR_BE_HOST SR_PRIORITY_NET SR_AUTO_PORTS
+  SR_QUERY_PORT SR_HTTP_PORT SR_RPC_PORT SR_EDIT_LOG_PORT
+  SR_BE_PORT SR_BE_HTTP_PORT SR_BE_HEARTBEAT SR_BE_BRPC_PORT
+)
+
+# sr_write_config <path> — write the SR_CONFIG_KEYS currently set in the env to
+# <path> (chmod 600). Merge semantics are the caller's job: srlib already sourced
+# the existing file into the env, so an unset key keeps its current value and any
+# SR_* present in the env (file value, or a one-off override) is what gets written.
+# Used by setup.sh (default/active profile) and workspace.sh (scaffold a profile).
+sr_write_config() {
+  local path="$1" tmp k v
+  ( umask 077
+    tmp="$path.tmp.$$"
+    {
+      echo "# starrocks-dev config — written by sr-connect"
+      for k in "${SR_CONFIG_KEYS[@]}"; do
+        v="${!k:-}"
+        [[ -n "$v" ]] && printf "%s='%s'\n" "$k" "$v"
+      done
+    } > "$tmp"
+    mv "$tmp" "$path"
+    chmod 600 "$path"
+  )
+}
 
 # sr_remote_home — the remote host's $HOME (cached for the process).
 sr_remote_home() {
@@ -84,7 +141,7 @@ _sr_build_ssh_opts() {
     -o ConnectTimeout=10
     -o ServerAliveInterval=15
     -o ControlMaster=auto
-    -o "ControlPath=$SR_CFG_DIR/cm-%r@%h:%p"
+    -o "ControlPath=$SR_CFG_BASE/cm-%r@%h:%p"
     -o ControlPersist=300
     -p "$SR_PORT"
   )

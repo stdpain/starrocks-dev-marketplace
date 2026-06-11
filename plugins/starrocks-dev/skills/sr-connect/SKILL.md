@@ -12,6 +12,11 @@ connection to a remote StarRocks dev host and confirms the remote is build-ready
 
 - Config lives at `~/.config/starrocks_dev/config.env` (chmod 600). All three
   skills read it through the shared helper `scripts/srlib.sh` at the plugin root.
+- **Profiles (parallel work):** setting `SR_PROFILE=<name>` switches the active
+  config to `~/.config/starrocks_dev/profiles/<name>/config.env`. Each profile is an
+  independent task — its own container, source worktree, deploy dir and ports — so
+  several features build/deploy in parallel. Leaving `SR_PROFILE` unset uses the
+  default config exactly as before. See **Parallel work** below.
 - SSH reuses a **ControlMaster** socket, so only the first command authenticates;
   the rest are instant for ~5 minutes.
 - Bastions are supported two ways: set `SR_PROXY_JUMP` (applied to ssh/scp/rsync as
@@ -128,6 +133,57 @@ bash scripts/sr.sh --src 'git status'                   # inside $SR_SRC (and de
 inside the dev-env container when configured). This is the primitive `sr-build`
 and `sr-deploy` are built on; use it for anything they don't cover (editing a
 config file via `sed`, inspecting logs, `git` operations, etc.).
+
+> `sr.sh` (like every skill) honors `SR_PROFILE` — `SR_PROFILE=featA bash
+> scripts/sr.sh --src 'git status'` runs against profile *featA*'s worktree/container.
+
+### `workspace.sh` — manage parallel profiles (create / list / rm)
+
+```bash
+bash scripts/workspace.sh list                          # default profile + all named ones
+bash scripts/workspace.sh create featA --branch feature/a   # worktree + scaffolded config
+bash scripts/workspace.sh rm featA                      # remove config + worktree + container
+```
+`create <name>` inherits the default profile's connection/image/cache settings and
+overrides only what must differ, in one step:
+- adds a **git worktree** on the remote (`git worktree add`, sharing the main repo's
+  `.git`) for `--branch` (created off `--base`, default current HEAD; the branch
+  name defaults to `<name>`) → becomes the profile's `SR_HOST_SRC`;
+- sets `SR_DOCKER=sr-dev-<name>` (container created on first build);
+- sets `SR_DEPLOY_DIR=<base deploy>/<name>` if the default deploys to a dir, else
+  runs in-place from the worktree's `output/`;
+- keeps `SR_AUTO_PORTS=1` so the cluster's ports won't collide with other profiles.
+
+Options: `--branch`, `--base`, `--src` (worktree host path; default
+`${SR_WS_ROOT:-$HOME/sr-ws}/<name>`), `--container`, `--deploy`. `rm` also
+git-worktree-removes the source and `docker rm -f`s the container unless
+`--keep-src` / `--keep-container` is passed. `.m2`/ccache are **shared** (the
+profile inherits `SR_M2`), so parallel builds reuse one cache.
+
+## Parallel work (build several features at once)
+
+The scripts are fully env-driven and the SSH ControlMaster is shared per host, so
+the only thing that needs isolating per task is the config. Profiles do exactly
+that. Typical flow:
+
+```bash
+# one-time: a configured default profile (setup.sh) is the template
+bash scripts/workspace.sh create featA --branch feature/a
+bash scripts/workspace.sh create featB --branch feature/b
+
+# build both at the same time (two containers, two worktrees, one shared cache)
+SR_PROFILE=featA bash ../../sr-build/scripts/build.sh &
+SR_PROFILE=featB bash ../../sr-build/scripts/build.sh &
+wait
+
+# deploy both — ports auto-allocate so the two clusters don't collide
+SR_PROFILE=featA bash ../../sr-deploy/scripts/deploy.sh up
+SR_PROFILE=featB bash ../../sr-deploy/scripts/deploy.sh up
+```
+
+Every skill command takes `SR_PROFILE=<name>` the same way. The agent prefixes it
+on each command; nothing else changes. Editing files: each profile has a distinct
+host worktree, so a change in featA's tree never affects featB's build.
 
 ## Notes for the agent
 

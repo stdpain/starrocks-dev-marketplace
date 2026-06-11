@@ -8,6 +8,10 @@ Compiles StarRocks on the remote dev host via `build.sh`, using the connection
 configured by **sr-connect**. Runs inside the dev-env container when `SR_DOCKER`
 is set. Output lands in `$SR_SRC/output/{fe,be}` on the remote.
 
+Prefix `SR_PROFILE=<name>` to build a specific parallel profile (its own container
++ source worktree); two `SR_PROFILE=A …` / `SR_PROFILE=B …` builds run at once. See
+sr-connect → **Parallel work** (`workspace.sh`).
+
 ## Usage
 
 ```bash

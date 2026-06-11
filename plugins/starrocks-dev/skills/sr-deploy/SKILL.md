@@ -9,6 +9,10 @@ Brings up and manages a single-node StarRocks dev cluster from
 using the connection from **sr-connect**. Talks to the FE over the MySQL protocol
 to register the BE and verify health.
 
+Prefix `SR_PROFILE=<name>` to deploy a parallel profile's cluster — each gets its
+own deploy dir and auto-allocated ports, so multiple clusters run side by side
+without colliding. See sr-connect → **Parallel work** (`workspace.sh`).
+
 ## Usage
 
 ```bash

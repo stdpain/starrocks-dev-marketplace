@@ -7,37 +7,14 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../..
 # shellcheck source=/dev/null
 source "$PLUGIN_ROOT/scripts/srlib.sh"
 
-# Persist every documented SR_* config key. srlib sources config.env, so any key
-# NOT written here is silently lost on the next command — keep this list in sync
-# with config.env.example. Merge semantics: srlib already loaded the existing file
-# into the environment, so an unset key keeps its current value and any SR_* present
-# in the environment (file value, or a one-off `SR_X=… bash setup.sh` override) is
-# what gets written back.
-KEYS=(
-  # connection
-  SR_HOST SR_USER SR_PORT SR_KEY SR_PROXY_JUMP SR_SRC
-  # docker dev-env
-  SR_DOCKER SR_IMAGE SR_HOST_SRC SR_NOFILE SR_M2 SR_DOCKER_RUN_OPTS
-  # build
-  SR_THIRDPARTY SR_JOBS SR_BUILD_TYPE
-  # deploy
-  SR_DEPLOY_DIR SR_DEPLOY_IN_DOCKER SR_MYSQL_HOST SR_BE_HOST SR_PRIORITY_NET SR_AUTO_PORTS
-  SR_QUERY_PORT SR_HTTP_PORT SR_RPC_PORT SR_EDIT_LOG_PORT
-  SR_BE_PORT SR_BE_HTTP_PORT SR_BE_HEARTBEAT SR_BE_BRPC_PORT
-)
-
-umask 077
-tmp="$SR_CFG_FILE.tmp.$$"
-{
-  echo "# starrocks-dev config — written by sr-connect/setup.sh"
-  for k in "${KEYS[@]}"; do
-    v="${!k:-}"
-    [[ -n "$v" ]] && printf "%s='%s'\n" "$k" "$v"
-  done
-} > "$tmp"
-mv "$tmp" "$SR_CFG_FILE"
-chmod 600 "$SR_CFG_FILE"
-sr_log "wrote $SR_CFG_FILE"
+# Persist every documented SR_* config key (the list + writer live in srlib so
+# setup.sh and workspace.sh stay in sync). Merge semantics: srlib already loaded the
+# existing file into the env, so an unset key keeps its current value and any SR_*
+# present in the env (file value, or a one-off `SR_X=… bash setup.sh` override) is
+# what gets written back. With SR_PROFILE=<name> set, SR_CFG_FILE points at that
+# profile's config — so setup.sh edits the active profile, not always the default.
+sr_write_config "$SR_CFG_FILE"
+sr_log "wrote $SR_CFG_FILE${SR_PROFILE:+ (profile: $SR_PROFILE)}"
 
 [[ -n "${SR_HOST:-}" ]] || sr_die "SR_HOST not set. Pass it, e.g.: SR_HOST=dev01 SR_USER=root SR_SRC=/root/starrocks bash scripts/setup.sh"
 
