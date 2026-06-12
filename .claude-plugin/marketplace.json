@@ -5,7 +5,7 @@
     "email": "stdpain@gmail.com"
   },
   "metadata": {
-    "description": "Skills for remote StarRocks development over SSH: connection management, build, and deploy.",
+    "description": "Skills for remote StarRocks development over SSH: connection management, build, deploy, and live-cluster inspection.",
     "version": "1.0.0",
     "pluginRoot": "./plugins"
   },
@@ -13,7 +13,7 @@
     {
       "name": "starrocks-dev",
       "source": "./plugins/starrocks-dev",
-      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, and deploy/start a cluster.",
+      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, deploy/start a cluster, and inspect a live cluster for perf/correctness.",
       "version": "1.0.0",
       "category": "devops",
       "author": {
