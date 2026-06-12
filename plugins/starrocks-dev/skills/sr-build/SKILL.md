@@ -41,6 +41,30 @@ BUILD_TYPE=Asan bash scripts/build.sh --be        # ASan backend
 - Streams compiler output live and exits with `build.sh`'s real exit code.
 - On success prints the resulting artifact paths under `output/`.
 
+## Waiting for the build — don't blind-poll
+
+A BE build takes minutes. **Rely on the wrapper's exit code / the background-task
+completion notification — do NOT spawn an `until grep … ; do sleep ; done` loop to
+watch the log.** Such loops auto-background, and if the grep pattern never matches
+the wrapper's real output they spin forever and *look* like a hung/stuck task (the
+classic symptom: the build finished with exit 0 long ago but a "waiter" task is
+still alive). This has bitten us — the build was fine; the polling loop was the bug.
+
+Do this instead:
+- Launch with `run_in_background: true` and let the `<task-notification>`
+  (with the real exit code) tell you it's done. That notification IS the signal.
+- To peek at progress mid-run, just `Read` the output file once and stop — never loop.
+- The wrapper's exit code is authoritative: **0 = success, non-zero = failure.**
+  You normally don't need to grep at all.
+
+Terminal markers the wrapper prints (both prefixed `starrocks-dev:`), if you must match:
+- success → `starrocks-dev: build OK. Artifacts:`
+- failure → `starrocks-dev: build failed (exit N).`
+
+Note `./build.sh --be` runs make in **two passes** (compile, then a collect/install
+pass that re-lists every `Built target …`), so a `[100%] Built target starrocks_be`
+is **not** the end — wait for the `build OK` line or the exit code.
+
 ## Key facts (verified against build.sh)
 
 - Targets: `--fe`, `--be`, `--spark-dpp`, `--hive-udf`, `--format-lib`. No target
