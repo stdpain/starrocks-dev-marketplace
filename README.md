@@ -9,8 +9,8 @@ deploying, and debugging the StarRocks source tree that lives on that host
 
 ## The plugin: `starrocks-dev`
 
-Five composable skills sharing one SSH connection layer
-(`plugins/starrocks-dev/scripts/srlib.sh`):
+Seven composable skills sharing one SSH connection layer
+(`plugins/starrocks-dev/scripts/srlib.sh`, plus `srcluster.sh` for live clusters):
 
 | Skill | Stage | What it does |
 |-------|-------|--------------|
@@ -19,6 +19,8 @@ Five composable skills sharing one SSH connection layer
 | **sr-test** | test | FE / BE / Java-ext unit tests and SQL regression tests; single-class, gtest-filter, or single-module runs. |
 | **sr-deploy** | deploy / run | Sync artifacts to a deploy dir, auto-pick free ports, start/stop/restart FE+BE, register the BE, run SQL to verify. |
 | **sr-diagnose** | triage / repro | From a crash/stack/issue: locate the source, check if it's a known/fixed issue, and if not reproduce it (ASan build → trigger → capture) with exact steps. |
+| **sr-inspect** | inspect | Connect to a **live** cluster through the dev host via a mysql connection string and inspect perf/correctness — SQL, EXPLAIN ANALYZE, query profiles, jstack/pstack/logs/sys on its nodes. |
+| **sr-rollout** | rollout | Full-replace a **live** cluster's FE/BE binaries with a worktree profile's `output/`, node by node — OS-matched, with backup/rollback and Alive health-checks. |
 
 Because these are **skills**, the usual way to use them is just to ask Claude in
 plain language — *"connect to my starrocks dev box and build the BE"*, *"start the
@@ -201,6 +203,45 @@ Workflow: **locate → is-it-known → reproduce → report**. `repro.sh` builds
 the cluster up (auto-ports), fires the trigger, and watches the logs for the crash
 signature (exit 0 = reproduced). Also cross-check upstream GitHub issues/PRs.
 
+### sr-inspect
+
+Connect to an **already-running** cluster **through the dev host** using a mysql
+connection string you provide (nothing is stored — pass `--conn`, or `export SR_CL_*`
+once per session). Node access (`jstack`/`pstack`/`logs`/`sys`) uses a fixed ssh
+account + password (+`--sudo`).
+
+```bash
+I=plugins/starrocks-dev/skills/sr-inspect/scripts/diag.sh
+C='mysql -h 10.0.0.21 -P 9030 -uroot -psecret'   # your connection string
+bash $I --conn "$C" conn                          # connect via dev host + reachability + FE/BE list
+bash $I --conn "$C" sql 'SHOW BACKENDS'
+bash $I --conn "$C" explain 'SELECT count(*) FROM t WHERE ...'   # EXPLAIN ANALYZE
+bash $I --conn "$C" profile <query_id>            # query profile via the FE HTTP API
+bash $I --conn "$C" --ssh-user ops --ssh-pass pw --sudo jstack <fe-node>
+bash $I --conn "$C" --ssh-user ops --ssh-pass pw --sudo logs <node> be
+```
+
+### sr-rollout
+
+Full-replace a **live** cluster's FE/BE binaries with a **worktree profile's**
+`output/` (build it first with sr-build), **through the dev host** — BEs first (FE
+stays up to verify), then FEs. Each node: stop → back up lib/bin → push new lib/bin →
+start → verify Alive. `plan` warns if a node's OS doesn't match the profile's dev-env
+image. Backups enable `rollback`.
+
+```bash
+R=plugins/starrocks-dev/skills/sr-rollout/scripts/rollout.sh
+C='mysql -h 10.0.0.21 -P 9030 -uroot -psecret'
+
+SR_PROFILE=myfeat bash ../sr-build/scripts/build.sh        # build the profile (OS-matched image)
+SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo plan          # dry-run + OS/image check
+SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo apply --yes   # full replace (BEs→FEs)
+SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo status        # versions + binary mtime/node
+SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo rollback      # restore latest backup
+```
+Build for the cluster's OS by pinning a matching image on the profile:
+`bash ../sr-connect/scripts/workspace.sh create <name> --image <…dev-env-centos7…>`.
+
 ---
 
 ## End-to-end examples
@@ -224,6 +265,17 @@ bash $G/known.sh 'CrashingFunc'                   # already fixed?
 bash $G/repro.sh --build asan --sql /tmp/min.sql --match 'AddressSanitizer'
 ```
 
+**Build a fix in a worktree profile and roll it out to a live cluster**
+```bash
+P=plugins/starrocks-dev/skills
+C='mysql -h 10.0.0.21 -P 9030 -uroot -psecret'
+# OS-matched profile so the binary's glibc/ABI matches the cluster nodes
+bash $P/sr-connect/scripts/workspace.sh create fix --branch hotfix --image <…/dev-env-centos7:latest>
+SR_PROFILE=fix bash $P/sr-build/scripts/build.sh
+SR_PROFILE=fix bash $P/sr-rollout/scripts/rollout.sh --conn "$C" --ssh-user ops --ssh-pass pw --sudo plan
+SR_PROFILE=fix bash $P/sr-rollout/scripts/rollout.sh --conn "$C" --ssh-user ops --ssh-pass pw --sudo apply --yes
+```
+
 ---
 
 ## Security
@@ -244,11 +296,14 @@ plugins/starrocks-dev/
 ├── .claude-plugin/plugin.json         # plugin manifest
 ├── config.env.example                 # config template (copy to ~/.config/starrocks_dev/)
 ├── scripts/srlib.sh                   # shared SSH/docker/file-transfer layer
+├── scripts/srcluster.sh               # shared LIVE-cluster helpers (sr-inspect / sr-rollout)
 └── skills/
-    ├── sr-connect/   (setup, env-up, doctor, sr)
+    ├── sr-connect/   (setup, env-up, doctor, sr, workspace)
     ├── sr-build/     (build)
     ├── sr-test/      (test)
     ├── sr-deploy/    (deploy)
-    └── sr-diagnose/  (analyze, known, repro)
+    ├── sr-diagnose/  (analyze, known, repro)
+    ├── sr-inspect/   (diag)
+    └── sr-rollout/   (rollout)
 ```
 Each skill's `SKILL.md` has the full option list, behavior notes, and triggers.

@@ -32,6 +32,7 @@ usage: workspace.sh <command>
       --base <ref>     base ref for a newly created branch (default: current HEAD)
       --src <path>     host path for the worktree (default: <SR_WS_ROOT or $HOME/sr-ws>/<name>)
       --container <c>  container name        (default: sr-dev-<name>)
+      --image <img>    dev-env image to pin  (default: inherit the base profile's SR_IMAGE)
       --deploy <dir>   deploy/run dir        (default: <base SR_DEPLOY_DIR>/<name>, else in-place)
   rm <name> [--keep-src] [--keep-container]
                        remove the profile config; also git-worktree-remove its source
@@ -72,13 +73,14 @@ cmd_create() {
   local name="${1:-}"; shift || true
   [[ -n "$name" ]] || usage
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || sr_die "invalid profile name '$name' (use letters, digits, . _ -)"
-  local branch="" base="" ws_src="" container="" deploy=""
+  local branch="" base="" ws_src="" container="" deploy="" image=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --branch)    branch="$2"; shift 2 ;;
       --base)      base="$2"; shift 2 ;;
       --src)       ws_src="$2"; shift 2 ;;
       --container) container="$2"; shift 2 ;;
+      --image)     image="$2"; shift 2 ;;
       --deploy)    deploy="$2"; shift 2 ;;
       *) sr_die "unknown option '$1'" ;;
     esac
@@ -149,12 +151,16 @@ cmd_create() {
     esac
   fi
   SR_DEPLOY_DIR="$deploy"
+  # Pin a specific dev-env image for this profile (e.g. an OS-matched centos/ubuntu image);
+  # otherwise inherit the base profile's SR_IMAGE. sr_ensure_docker pulls/creates from it.
+  [[ -n "$image" ]] && SR_IMAGE="$image"
   SR_AUTO_PORTS="${SR_AUTO_PORTS:-1}"   # keep auto-ports so this cluster avoids the others'
   sr_write_config "$cfg"
   sr_log "wrote $cfg"
   cat >&2 <<EOF
 starrocks-dev: profile '$name' ready.
   container : $container   (created on first build)
+  image     : ${SR_IMAGE:-<inherited default>}
   source    : $ws_src   (branch $branch, shares .git with $main_src)
   deploy    : ${deploy:-<in-place from worktree output/>}
   ports     : auto-allocated on first deploy (won't collide with other profiles)

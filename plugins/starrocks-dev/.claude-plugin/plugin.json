@@ -1,6 +1,6 @@
 {
   "name": "starrocks-dev",
-  "description": "Drive a remote StarRocks dev host over SSH. Six skills: sr-connect (SSH/dev-env setup + verify), sr-build (compile FE/BE), sr-test (FE/BE/regression tests), sr-deploy (deploy + start/stop cluster, auto-ports), sr-diagnose (locate/reproduce a crash from a stack trace), sr-inspect (connect to a live cluster through the dev host and inspect perf/correctness).",
+  "description": "Drive a remote StarRocks dev host over SSH. Seven skills: sr-connect (SSH/dev-env setup + verify), sr-build (compile FE/BE), sr-test (FE/BE/regression tests), sr-deploy (deploy + start/stop cluster, auto-ports), sr-diagnose (locate/reproduce a crash from a stack trace), sr-inspect (connect to a live cluster through the dev host and inspect perf/correctness), sr-rollout (full-replace a live cluster's binaries with a worktree profile's build, OS-matched, node by node).",
   "version": "1.0.0",
   "license": "BSD-3-Clause",
   "author": {
