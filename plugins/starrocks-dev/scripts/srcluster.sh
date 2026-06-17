@@ -104,7 +104,7 @@ _b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
 # cl_hostrun "<cmd>" — execute an arbitrary command string ON the dev host. Shipped
 # base64-encoded so any quoting / $() / pipes inside survive untouched.
-cl_hostrun() { rsh "echo $(_b64 "$1") | base64 -d | bash"; }
+cl_hostrun() { rsh "echo $(_b64 "$1") | base64 -d | bash" </dev/null; }
 
 # cl_mysql "<SQL>" — run SQL on the cluster from the dev host. Password via MYSQL_PWD
 # (kept off the process command line) and base64-wrapped so any character is safe.

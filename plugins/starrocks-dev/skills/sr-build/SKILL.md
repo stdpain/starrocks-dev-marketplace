@@ -76,6 +76,12 @@ is **not** the end — wait for the `build OK` line or the exit code.
   `output/be`. `sr-deploy` consumes exactly this.
 - A first-ever BE build is slow (full C++ + thirdparty linkage); `ccache` makes
   subsequent builds far faster — `sr-connect doctor.sh` reports whether it's present.
+- Set `SR_CCACHE` (host dir, e.g. `$HOME/.ccache`) on the base config so the dev-env
+  container mounts a **shared** ccache at `/root/.ccache`. The cache is namespaced per
+  dev-env image and uses `hash_dir=false` + `CCACHE_BASEDIR=$SR_SRC`, so a new profile's
+  worktree (a different source path) still hits the cache another profile warmed on the
+  same image — instead of recompiling cold. Without `SR_CCACHE`, each profile's container
+  has its own empty cache.
 
 ## Notes for the agent
 

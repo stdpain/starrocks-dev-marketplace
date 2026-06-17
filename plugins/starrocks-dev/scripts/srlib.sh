@@ -54,6 +54,21 @@ if [[ -f "$SR_CFG_FILE" ]]; then
   unset _k _vn _SR_ENV_OVERRIDE ${!_SR_VAL_@}
 fi
 
+# Host-global keys inherited from the BASE config by an active profile when the
+# profile didn't set them. A profile's config.env is a snapshot taken at create
+# time, so a profile created BEFORE these keys were added to the base would never
+# see them otherwise. SR_CCACHE / SR_CCACHE_SIZE describe ONE host-level shared
+# cache (namespaced per image), so they belong to the whole box, not a snapshot.
+if [[ -n "${SR_PROFILE:-}" && -f "$SR_CFG_BASE/config.env" ]]; then
+  for _gk in SR_CCACHE SR_CCACHE_SIZE; do
+    if [[ -z "${!_gk:-}" ]]; then
+      _gv=$(sed -n "s/^$_gk='\(.*\)'\$/\1/p" "$SR_CFG_BASE/config.env" | tail -1)
+      [[ -n "$_gv" ]] && printf -v "$_gk" '%s' "$_gv"
+    fi
+  done
+  unset _gk _gv
+fi
+
 # Defaults (only applied if unset).
 SR_PORT="${SR_PORT:-22}"
 SR_BUILD_TYPE="${SR_BUILD_TYPE:-Release}"
@@ -64,8 +79,15 @@ SR_IMAGE="${SR_IMAGE:-starrocks/dev-env-ubuntu:latest}"
 # e.g. /home/<user>/starrocks — because the in-container build path SR_SRC
 # (e.g. /root/starrocks) differs from the host path. Set it explicitly to override.
 SR_NOFILE="${SR_NOFILE:-655350}"
+# Shared-ccache size cap, per dev-env image (see SR_CCACHE).
+SR_CCACHE_SIZE="${SR_CCACHE_SIZE:-80G}"
 # SR_DOCKER          — container name; when set, build/test/deploy run inside it
 # SR_M2              — host ~/.m2 path to mount as /root/.m2 (Maven cache reuse)
+# SR_CCACHE          — host dir holding the shared C++ ccache. Mounted as /root/.ccache,
+#                      namespaced per dev-env image so all profiles on the same toolchain
+#                      share one warm cache (different OS images stay isolated). Inherited
+#                      by every profile, so set it once on the base config.
+# SR_CCACHE_SIZE     — ccache max_size cap, PER dev-env image (default 80G).
 # SR_DOCKER_RUN_OPTS — extra `docker run` opts, e.g. '--network host' or '-p 9030:9030'
 
 sr_log()  { printf 'starrocks-dev: %s\n' "$*" >&2; }
@@ -78,7 +100,7 @@ SR_CONFIG_KEYS=(
   # connection
   SR_HOST SR_USER SR_PORT SR_KEY SR_PROXY_JUMP SR_SRC
   # docker dev-env
-  SR_DOCKER SR_IMAGE SR_HOST_SRC SR_NOFILE SR_M2 SR_DOCKER_RUN_OPTS
+  SR_DOCKER SR_IMAGE SR_HOST_SRC SR_NOFILE SR_M2 SR_CCACHE SR_CCACHE_SIZE SR_DOCKER_RUN_OPTS
   # build
   SR_THIRDPARTY SR_JOBS SR_BUILD_TYPE
   # deploy
@@ -223,8 +245,31 @@ sr_ensure_docker() {
     fi
     local mounts="-v '$SR_HOST_SRC':'$SR_SRC'"
     [[ -n "${SR_M2:-}" ]] && mounts+=" -v '$SR_M2':/root/.m2"
+    # Shared ccache. The cache dir is namespaced by dev-env IMAGE (= toolchain/OS),
+    # NOT by profile: every profile on the same image shares one warm cache, while
+    # a different OS image lands in a separate dir so toolchains never cross-pollute.
+    # base_dir is set per container to SR_SRC (via CCACHE_BASEDIR) and hash_dir=false,
+    # so the same source built from different worktree paths still hits.
+    local cc_opts=""
+    if [[ -n "${SR_CCACHE:-}" ]]; then
+      local cctag cdir
+      cctag=$(printf '%s' "$SR_IMAGE" | tr -c 'A-Za-z0-9._-' '_')
+      cdir="$SR_CCACHE/$cctag"
+      rsh "mkdir -p '$cdir' && cat > '$cdir/ccache.conf' <<'CCACHE_CONF'
+max_size = $SR_CCACHE_SIZE
+hash_dir = false
+compiler_check = content
+sloppiness = time_macros,include_file_mtime,include_file_ctime,pch_defines
+CCACHE_CONF" || sr_die "failed to prepare shared ccache dir $cdir on the remote host."
+      mounts+=" -v '$cdir':/root/.ccache"
+      # CCACHE_DIR pins the location (ccache 4.x otherwise defaults to ~/.cache/ccache);
+      # CCACHE_BASEDIR rewrites absolute paths under the source root to relative before
+      # hashing, so base and named profiles (different SR_SRC) share cache entries.
+      cc_opts="-e CCACHE_DIR=/root/.ccache -e CCACHE_BASEDIR='$SR_SRC'"
+      sr_log "ccache: shared $cdir -> /root/.ccache (image-namespaced, basedir=$SR_SRC)"
+    fi
     sr_log "creating container $SR_DOCKER from $SR_IMAGE (mount $SR_HOST_SRC -> $SR_SRC) ..."
-    rsh "docker run --name '$SR_DOCKER' --ulimit nofile=${SR_NOFILE}:${SR_NOFILE} $mounts ${SR_DOCKER_RUN_OPTS:-} -dit '$SR_IMAGE' /bin/bash" >/dev/null \
+    rsh "docker run --name '$SR_DOCKER' --ulimit nofile=${SR_NOFILE}:${SR_NOFILE} $mounts $cc_opts ${SR_DOCKER_RUN_OPTS:-} -dit '$SR_IMAGE' /bin/bash" >/dev/null \
       || sr_die "docker run failed for $SR_DOCKER"
     sr_log "container $SR_DOCKER is up."
   fi

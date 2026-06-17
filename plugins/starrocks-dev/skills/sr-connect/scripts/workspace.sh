@@ -10,7 +10,9 @@
 #
 # A profile inherits the DEFAULT profile's connection + image + cache settings and
 # overrides only what must differ (container name, source worktree, deploy dir).
-# The .m2 / ccache mounts are shared (SR_M2 is inherited) so builds reuse one cache.
+# Because SR_M2 / SR_CCACHE are inherited, every profile's container mounts the same
+# Maven + ccache caches (ccache namespaced per image), so a new profile's first build
+# reuses the existing warm cache instead of starting cold.
 set -uo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
