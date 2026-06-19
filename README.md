@@ -9,7 +9,7 @@ deploying, and debugging the StarRocks source tree that lives on that host
 
 ## The plugin: `starrocks-dev`
 
-Eight composable skills sharing one SSH connection layer
+Ten composable skills sharing one SSH connection layer
 (`plugins/starrocks-dev/scripts/srlib.sh`, plus `srcluster.sh` for live clusters):
 
 | Skill | Stage | What it does |
@@ -22,6 +22,8 @@ Eight composable skills sharing one SSH connection layer
 | **sr-inspect** | inspect | Connect to a **live** cluster through the dev host via a mysql connection string and inspect perf/correctness — SQL, EXPLAIN ANALYZE, query profiles, jstack/pstack/logs/sys on its nodes. |
 | **sr-rollout** | rollout | Full-replace a **live** cluster's FE/BE binaries with a worktree profile's `output/`, node by node — OS-matched, with backup/rollback and Alive health-checks. |
 | **sr-backport** | backport | Cherry-pick a merged PR onto a release branch in an isolated worktree, surface conflicts for Claude to resolve, then build + run related UTs on the **branch-matching** dev-env image (backport to 4.1 → 4.1 image). Stops at a verified local commit; you review & push. |
+| **sr-bench** | benchmark clusters | Register **benchmark/test clusters** by name — reached through a jump host (a bastion or the dev host), logged into with a **shared account+password from env vars** (never stored). Connect + health-check, run SQL, ssh to nodes, and **`wake`** to start FE/BE that a suspend left down. |
+| **sr-scan** | static bug hunt | **Proactively hunt bugs**: statically scan a module/flow for risky patterns, reason about each path, then **prove** the real ones by reproducing — SQLTest/regression, StarRocks **failpoint**, **strace** syscall-error injection, **eBPF** probe, or **Linux kernel fault injection** — and record each confirmed bug to markdown. |
 
 Because these are **skills**, the usual way to use them is just to ask Claude in
 plain language — *"connect to my starrocks dev box and build the BE"*, *"start the
@@ -45,6 +47,19 @@ commands below are the underlying primitives you (or Claude) can also run direct
   cluster runs from it, so `meta`/`storage` survive a rebuild. On a shared box,
   `SR_AUTO_PORTS=1` (default) probes free ports and **pins** them per cluster so
   restarts don't drift.
+- **Live & benchmark clusters.** sr-inspect / sr-rollout / sr-bench operate on an
+  *already-running* cluster reached **through a jump** — by default the dev host
+  (`SR_HOST`), or a dedicated bastion (`SR_CL_JUMP` / a sr-bench `--jump`). Every
+  `mysql`/`ssh` runs on that jump over the same ControlMaster; the cluster's own
+  account+password is passed per-invocation (a `--conn` string, or read from env
+  vars by sr-bench) and **never stored**.
+- **Bug hunting (sr-scan).** Scanning is a remote `grep` over the source for risk
+  patterns; *proving* a finding means forcing the error path on a throwaway dev
+  cluster. The reproduction methods escalate in privilege — a **SQLTest** needs
+  nothing special; a **failpoint** needs a fault-injection BE build; **strace**
+  syscall injection needs `CAP_SYS_PTRACE`; **kernel fault injection** / **eBPF**
+  need a fault-injection kernel and host root. Each method sets up the fault, fires
+  the trigger via sr-diagnose's `repro.sh`, then **always tears the fault down**.
 
 ---
 
@@ -98,6 +113,16 @@ $EDITOR ~/.config/starrocks_dev/config.env
 | `SR_QUERY_PORT` … `SR_BE_BRPC_PORT` | port search starts | StarRocks defaults |
 | `SR_MYSQL_HOST` / `SR_BE_HOST` | FE host / BE address to register | `127.0.0.1` |
 | `SR_PRIORITY_NET` | CIDR for multi-NIC hosts | — |
+
+**Benchmark clusters (sr-bench)** aren't config.env keys — they're a separate named
+registry under `~/.config/starrocks_dev/bench/<name>.env` (topology + credential
+*variable names*, no secrets). Their shared login is read from the environment at run
+time: `export SR_BENCH_USER=root SR_BENCH_PASS=…`. See the [sr-bench](#sr-bench) section.
+
+**Bug-hunt reproduction (sr-scan)** can need extra capabilities the dev-env container
+lacks by default: strace syscall injection needs `SR_DOCKER_RUN_OPTS='--cap-add=SYS_PTRACE'`
+(recreate the container after setting it), and kernel fault injection / eBPF need host root
+on a fault-injection kernel. See the [sr-scan](#sr-scan) section.
 
 ---
 
@@ -237,11 +262,13 @@ C='mysql -h 10.0.0.21 -P 9030 -uroot -psecret'
 SR_PROFILE=myfeat bash ../sr-build/scripts/build.sh        # build the profile (OS-matched image)
 SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo plan          # dry-run + OS/image check
 SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo apply --yes   # full replace (BEs→FEs)
+SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo --parallel apply --yes  # roll ALL BEs at once
 SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo status        # versions + binary mtime/node
 SR_PROFILE=myfeat bash $R --conn "$C" --ssh-user ops --ssh-pass pw --sudo rollback      # restore latest backup
 ```
-Build for the cluster's OS by pinning a matching image on the profile:
-`bash ../sr-connect/scripts/workspace.sh create <name> --image <…dev-env-centos7…>`.
+`--parallel` (all BEs at once) / `--jobs N` (N at a time) speed up many-BE **benchmark**
+clusters; FEs always roll one at a time. Build for the cluster's OS by pinning a matching
+image on the profile: `bash ../sr-connect/scripts/workspace.sh create <name> --image <…dev-env-centos7…>`.
 
 ---
 
@@ -266,6 +293,62 @@ SR_PROFILE=bp-4.1-pr12345 bash $B diff           # review, then push yourself
 ```
 The image tag follows `SR_BP_IMAGE_TPL` (`{base}:{branch}` by default, or `{base}:{ver}`
 for registries tagged `…:4.1`); override per-run with `prepare --image <ref>`.
+
+---
+
+### sr-bench
+
+Register **benchmark/test clusters** by name and operate them. They're reached through a
+**jump** (a dedicated bastion via `--jump`, or — when omitted — the sr-connect dev host),
+logged into with a **shared account+password** kept in env vars and never written to disk;
+the registry stores only topology + the cred **variable names**. Because these clusters get
+**suspended**, the registry also keeps a **node inventory + StarRocks home** so `wake` can
+ssh in and start whatever FE/BE is down (when the FE itself is down, `SHOW BACKENDS` can't
+discover them).
+
+```bash
+S=plugins/starrocks-dev/skills/sr-bench/scripts/bench.sh
+export SR_BENCH_USER=root SR_BENCH_PASS='…'        # shared creds — env only, never stored
+
+bash $S add tpch --fe 10.0.0.21 --jump ops@bastion01 \
+     --fe-nodes 10.0.0.21=/data/sr/fe --be-nodes '10.0.0.22,10.0.0.23' --be-home /data/sr/be
+bash $S ls                              # all clusters (FE, jump, node counts)
+bash $S tpch                            # = conn: reachability + version + FRONTENDS/BACKENDS
+bash $S status tpch                     # conn + per-node FE/BE up/DOWN
+bash $S wake tpch                       # ssh to each node, start any down FE/BE (FEs first)
+bash $S sql tpch 'SHOW BACKENDS'
+eval "$(bash $S env tpch)"              # then drive sr-inspect / sr-rollout against it
+```
+
+`wake` starts FE/BE as the SSH login user (never sudo, to avoid root-owned pid files). Omit
+`--jump` for clusters reachable from the dev host; with `--jump` the bastion is reached by
+key (`--jump-key`) or the shared password (needs `sshpass` locally).
+
+---
+
+### sr-scan
+
+**Hunt** for bugs instead of waiting for a crash: scan a module/flow, reason about each risky
+path, then **prove** the real ones by reproducing and record them. Four phases — scan →
+analyze → reproduce → record.
+
+```bash
+S=plugins/starrocks-dev/skills/sr-scan/scripts
+bash $S/scan.sh be/src/storage/lake --hooks         # risk candidates + repro hooks (failpoints/tests)
+bash $S/scan.sh --flow ChunkAggregator::aggregate   # scan one function's flow
+# ...read candidates, follow the path, keep the real ones, then reproduce the cheapest faithful way:
+bash ../sr-diagnose/scripts/repro.sh --build asan --sql /tmp/t.sql --match 'Check failed'   # SQLTest
+bash $S/inject.sh failpoint run --enable '<SQL>' --disable '<SQL>' --sql /tmp/t.sql          # internal error path
+bash $S/inject.sh syscall --proc be --syscall pwrite64 --errno EIO --when 3 --sql /tmp/t.sql # fail a syscall
+bash $S/inject.sh kfail --type fail_make_request --probability 100 --sql /tmp/t.sql          # kernel fault inj.
+bash $S/inject.sh ebpf --script probe.bt --sql /tmp/t.sql                                    # eBPF observe/inject
+bash $S/record.sh add --title "..." --status reproduced --location be/...:NN --method syscall:EIO --trigger /tmp/t.sql
+```
+
+Each `inject.sh` method sets up the fault, fires the trigger via sr-diagnose's `repro.sh`
+(watching `be.out`/`fe.log`), then tears it down. Only **reproduced** findings are
+high-confidence; unproven ones are recorded as `suspected`. Needs a throwaway dev cluster up
+(`sr-deploy up`) for runtime reproduction. For triaging an *existing* crash, use sr-diagnose.
 
 ---
 
@@ -301,6 +384,31 @@ SR_PROFILE=fix bash $P/sr-rollout/scripts/rollout.sh --conn "$C" --ssh-user ops 
 SR_PROFILE=fix bash $P/sr-rollout/scripts/rollout.sh --conn "$C" --ssh-user ops --ssh-pass pw --sudo apply --yes
 ```
 
+**Hunt for a bug in a module and prove it**
+```bash
+P=plugins/starrocks-dev/skills
+bash $P/sr-deploy/scripts/deploy.sh up                                  # throwaway dev cluster
+bash $P/sr-scan/scripts/scan.sh be/src/storage/lake --hooks            # 1) scan → candidates + hooks
+# 2) read the candidates, follow the path, form a hypothesis, then 3) reproduce:
+bash $P/sr-scan/scripts/inject.sh syscall --proc be --syscall pwrite64 --errno EIO --when 2 \
+     --sql /tmp/trigger.sql --match 'status_code|Check failed'
+# 4) record the confirmed bug
+bash $P/sr-scan/scripts/record.sh add --title "EIO on segment flush is swallowed" \
+     --status reproduced --component be/storage/lake --location be/src/storage/lake/x.cpp:88 \
+     --class unchecked-status --method syscall:EIO --trigger /tmp/trigger.sql
+```
+
+**Wake a suspended benchmark cluster and inspect it**
+```bash
+P=plugins/starrocks-dev/skills
+export SR_BENCH_USER=root SR_BENCH_PASS='…'                 # shared creds — env only
+bash $P/sr-bench/scripts/bench.sh status tpch               # FE down / nodes DOWN → suspended
+bash $P/sr-bench/scripts/bench.sh wake tpch                 # ssh in, start FE then BEs
+bash $P/sr-bench/scripts/bench.sh tpch                      # confirm version + all nodes Alive
+eval "$(bash $P/sr-bench/scripts/bench.sh env tpch)"        # hand off to sr-inspect
+bash $P/sr-inspect/scripts/diag.sh explain 'SELECT ...'     # profile a slow benchmark query
+```
+
 ---
 
 ## Security
@@ -309,7 +417,12 @@ This repo is intended to be public. Real hosts, jump hosts, private-registry
 addresses, internal paths, and SSH keys live **only** in your private
 `~/.config/starrocks_dev/config.env` (and are git-ignored if placed in-tree). The
 checked-in template uses placeholders only. The SSH ControlMaster socket and any
-secrets are never printed by the scripts.
+secrets are never printed by the scripts. sr-bench keeps cluster credentials out of
+its registry too — only the env-var *names* are stored.
+
+Some skills are **destructive by design** — sr-rollout swaps live binaries, and sr-scan
+runs arbitrary SQL and injects faults (syscall/kernel/eBPF) into the cluster. Point them
+at a throwaway dev or test cluster, never one you care about.
 
 ---
 
@@ -321,7 +434,7 @@ plugins/starrocks-dev/
 ├── .claude-plugin/plugin.json         # plugin manifest
 ├── config.env.example                 # config template (copy to ~/.config/starrocks_dev/)
 ├── scripts/srlib.sh                   # shared SSH/docker/file-transfer layer
-├── scripts/srcluster.sh               # shared LIVE-cluster helpers (sr-inspect / sr-rollout)
+├── scripts/srcluster.sh               # shared LIVE-cluster helpers (sr-inspect / sr-rollout / sr-bench)
 └── skills/
     ├── sr-connect/   (setup, env-up, doctor, sr, workspace)
     ├── sr-build/     (build)
@@ -330,6 +443,8 @@ plugins/starrocks-dev/
     ├── sr-diagnose/  (analyze, known, repro)
     ├── sr-inspect/   (diag)
     ├── sr-rollout/   (rollout)
-    └── sr-backport/  (backport)
+    ├── sr-backport/  (backport)
+    ├── sr-bench/     (bench)
+    └── sr-scan/      (scan, inject, record)
 ```
 Each skill's `SKILL.md` has the full option list, behavior notes, and triggers.

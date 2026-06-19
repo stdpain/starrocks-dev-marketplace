@@ -29,6 +29,12 @@ multi-node test/staging cluster reached *from* the dev host.)
   Alive is verified via SQL), then FEs. Each node: **stop → back up current lib/bin →
   push new lib/bin → start → health-check**. Conf / meta / storage / log are left
   untouched. Backups under `<home>/.sr-rollout-backup/<ts>` enable `rollback`.
+- **Parallel BEs for benchmark clusters.** By default BEs roll one at a time. On a
+  benchmark/test cluster, brief full-BE downtime is fine, so `--parallel` rolls **all**
+  BEs at once (or `--jobs N` for up to N at a time) — much faster on a many-BE cluster.
+  Each node's log is captured and printed grouped, so parallel output stays readable.
+  **FEs always roll sequentially regardless** — rolling FEs together can disrupt the
+  BDBJE metadata quorum/leader. Parallelism applies to `apply` and `rollback`.
 - **Ownership is preserved — never run the cluster as root.** With `--sudo` the extract
   runs as root, so the swapped `lib`/`bin` land root-owned. After each push the skill
   **chowns the swapped dirs back to the install dir's owner** (the service user) and
@@ -62,6 +68,8 @@ SR_PROFILE=myfeat bash scripts/rollout.sh --conn "$C" --ssh-user ops --ssh-pass 
 # 2) APPLY: full replacement (BEs then FEs). Prompts unless --yes.
 SR_PROFILE=myfeat bash scripts/rollout.sh --conn "$C" --ssh-user ops --ssh-pass pw --sudo apply
 SR_PROFILE=myfeat bash scripts/rollout.sh ... apply be      # only BEs   (or: apply fe)
+SR_PROFILE=myfeat bash scripts/rollout.sh ... --parallel apply   # roll ALL BEs at once (benchmark cluster)
+SR_PROFILE=myfeat bash scripts/rollout.sh ... --jobs 4 apply     # up to 4 BEs concurrently
 
 # 3) status / rollback
 SR_PROFILE=myfeat bash scripts/rollout.sh ... status        # versions + installed binary mtime per node
@@ -84,6 +92,7 @@ SR_PROFILE=myfeat bash scripts/rollout.sh ... rollback      # restore each node'
 - `--conn '<str>'` (or `SR_CL_CONN`) — primary cluster input; `--fe/--port/--user/--password/--db` override parsed fields.
 - `--ssh-user/--ssh-pass/--ssh-key/--ssh-port`, `--sudo` — node access (same as sr-inspect). `--sudo` is also used for the remote extract when the install dir is owned by another user.
 - `--fe-home <path>` / `--be-home <path>` (or `SR_RO_FE_HOME` / `SR_RO_BE_HOME`) — override the auto-detected install dir on every node (use when detection via the running process fails).
+- `--parallel` / `--jobs <N>` (or `SR_RO_JOBS=all` / `SR_RO_JOBS=N`) — roll BEs concurrently: `--parallel` = all BEs at once, `--jobs N` = up to N at a time. Default is sequential. **BE-only** — FEs always roll one at a time. Best for benchmark/test clusters (brief simultaneous BE downtime). `plan` prints the effective mode.
 - `--yes` (or `SR_RO_YES=1`) — skip the confirmation prompt before `apply` / `rollback`.
 
 ## Notes & caveats

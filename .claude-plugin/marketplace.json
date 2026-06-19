@@ -5,7 +5,7 @@
     "email": "stdpain@gmail.com"
   },
   "metadata": {
-    "description": "Skills for remote StarRocks development over SSH: connection management, build, deploy, and live-cluster inspection.",
+    "description": "Skills for remote StarRocks development over SSH: connection, build, test, deploy, crash diagnosis, live-cluster inspection & rollout, PR backport, benchmark-cluster management, and static bug-scan with fault-injection reproduction.",
     "version": "1.0.0",
     "pluginRoot": "./plugins"
   },
@@ -13,8 +13,8 @@
     {
       "name": "starrocks-dev",
       "source": "./plugins/starrocks-dev",
-      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, deploy/start a cluster, inspect a live cluster for perf/correctness, roll out binaries, and backport merged PRs to release branches (conflict-resolve + branch-image verify).",
-      "version": "1.0.1",
+      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, deploy/start a cluster, inspect a live cluster for perf/correctness, roll out binaries, backport merged PRs to release branches (conflict-resolve + branch-image verify), manage named benchmark/test clusters behind a jump host (connect + wake suspended FE/BE), and statically scan modules for bugs then reproduce them (SQLTest/failpoint/strace/eBPF/kernel fault injection) and record findings.",
+      "version": "1.2.0",
       "category": "devops",
       "author": {
         "name": "stdpain",

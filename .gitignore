@@ -21,3 +21,6 @@ cm-*
 *.log
 *.tmp
 *.tmp.*
+
+# sr-scan default findings report (a per-run artifact, not part of the plugin)
+bug-scan-findings.md

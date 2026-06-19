@@ -52,6 +52,10 @@ Node-SSH flags (for stop/start/push on each node — fixed account + password, +
 Rollout options:
   --fe-home <path>     override the detected FE install dir on every node (SR_RO_FE_HOME)
   --be-home <path>     override the detected BE install dir on every node (SR_RO_BE_HOME)
+  --parallel           roll ALL BE nodes at once instead of one-by-one (SR_RO_JOBS=all).
+                       Faster on a benchmark/test cluster, where full BE downtime is fine.
+  --jobs <N>           roll up to N BE nodes concurrently (SR_RO_JOBS=N). FEs always roll
+                       sequentially regardless (parallel FEs can break the meta quorum).
   --yes                skip the confirmation prompt before apply (SR_RO_YES=1)
 
 Commands:
@@ -68,21 +72,27 @@ EOF
 
 # ---- params: shared cluster/ssh flags via srcluster.sh; rollout-only flags here ----
 FE_HOME="${SR_RO_FE_HOME:-}"; BE_HOME="${SR_RO_BE_HOME:-}"; ASSUME_YES="${SR_RO_YES:-}"
+# BE concurrency: ''/1 = sequential (default, safe); N = up to N BEs at once; 'all' = every BE.
+BE_JOBS="${SR_RO_JOBS:-}"
 POS=()
 while [[ $# -gt 0 ]]; do
   cl_take_flag "$1" "${2:-}"
   if [[ "$CL_TAKEN" == 1 ]]; then shift "$CL_SHIFT"; continue; fi
   case "$1" in
-    --fe-home) FE_HOME="$2"; shift 2 ;;
-    --be-home) BE_HOME="$2"; shift 2 ;;
-    --yes)     ASSUME_YES=1; shift ;;
-    -h|--help) usage 0 ;;
-    --)        shift; POS+=("$@"); break ;;
-    -*)        sr_die "unknown option '$1' (see --help)" ;;
-    *)         POS+=("$1"); shift ;;
+    --fe-home)  FE_HOME="$2"; shift 2 ;;
+    --be-home)  BE_HOME="$2"; shift 2 ;;
+    --parallel) BE_JOBS="all"; shift ;;
+    --jobs)     BE_JOBS="$2"; shift 2 ;;
+    --yes)      ASSUME_YES=1; shift ;;
+    -h|--help)  usage 0 ;;
+    --)         shift; POS+=("$@"); break ;;
+    -*)         sr_die "unknown option '$1' (see --help)" ;;
+    *)          POS+=("$1"); shift ;;
   esac
 done
 cl_finalize_params
+[[ -z "$BE_JOBS" || "$BE_JOBS" == all || "$BE_JOBS" =~ ^[1-9][0-9]*$ ]] \
+  || sr_die "--jobs takes a positive integer (or use --parallel for all BEs), got '$BE_JOBS'"
 
 cmd="${POS[0]:-plan}"
 role="${POS[1]:-all}"
@@ -253,14 +263,63 @@ echo "    restored from $bk"'
   stop_node "$r" "$home" "$node"; start_node "$r" "$home" "$node" "$owner"; wait_alive "$r" "$node"
 }
 
+# resolve_jobs <node-count> — the BE concurrency to use: 1 (sequential), the count
+# ('all'), or the requested N, clamped to [1, count] and a 64 hard cap (typo guard).
+resolve_jobs() {
+  local cnt="$1" n="${BE_JOBS:-}"
+  { [[ -z "$n" || "$n" == 1 ]]; } && { echo 1; return; }
+  [[ "$n" == all ]] && { echo "$cnt"; return; }
+  (( n > cnt )) && n=$cnt; (( n < 1 )) && n=1; (( n > 64 )) && n=64
+  echo "$n"
+}
+
+# run_concurrent <fn> <maxj> <list> — run <fn> ROLE ip for each line of <list>, up to
+# <maxj> at a time (batched). Each node's output is captured to a temp file and printed
+# grouped after its batch, so parallel logs don't interleave into noise.
+run_concurrent() {
+  local fn="$1" maxj="$2" list="$3" rc=0 r ip
+  local tmpd; tmpd=$(mktemp -d 2>/dev/null) || { tmpd="${TMPDIR:-/tmp}/sr-rollout.$$"; mkdir -p "$tmpd"; }
+  local -a items=()
+  while read -r r ip; do [[ -n "$ip" ]] && items+=("$r $ip"); done <<< "$list"
+  local n=${#items[@]} i=0 k
+  while (( i < n )); do
+    local -a pids=() tags=()
+    local j=0
+    while (( j < maxj && i < n )); do
+      local it="${items[$i]}"; r="${it%% *}"; ip="${it#* }"
+      ( "$fn" "$r" "$ip" >"$tmpd/$ip.log" 2>&1 ) &
+      pids+=("$!"); tags+=("$it"); ((i++)); ((j++))
+    done
+    for k in "${!pids[@]}"; do wait "${pids[$k]}" || rc=1; done
+    for k in "${!tags[@]}"; do
+      echo "── ${tags[$k]} ──"; cat "$tmpd/${tags[$k]#* }.log" 2>/dev/null
+    done
+  done
+  rm -rf "$tmpd"
+  return $rc
+}
+
 # run the cycle over BEs first (FE stays up to verify each), then FEs. Honors the
-# command-line role filter (all|be|fe).
+# command-line role filter (all|be|fe). BEs may run concurrently (--parallel/--jobs) —
+# fine on a benchmark/test cluster where BE downtime is acceptable; FEs always go one at
+# a time so the metadata quorum/leader is never disrupted.
 for_each_node() {
-  local fn="$1"; local rc=0 bes="" fes="" r ip
-  [[ "$role" != fe ]] && bes=$(nodes_for_role be)
-  [[ "$role" != be ]] && fes=$(nodes_for_role fe)
-  while read -r r ip; do [[ -n "$ip" ]] || continue; "$fn" "$r" "$ip" || rc=1; done <<< "$bes"
-  while read -r r ip; do [[ -n "$ip" ]] || continue; "$fn" "$r" "$ip" || rc=1; done <<< "$fes"
+  local fn="$1"; local rc=0 r ip
+  if [[ "$role" != fe ]]; then
+    local bes; bes=$(nodes_for_role be)
+    local cnt; cnt=$(printf '%s\n' "$bes" | grep -c .)
+    local maxj; maxj=$(resolve_jobs "$cnt")
+    if (( maxj > 1 && cnt > 1 )); then
+      sr_log "rolling $cnt BE node(s), up to $maxj at a time (parallel) ..."
+      run_concurrent "$fn" "$maxj" "$bes" || rc=1
+    else
+      while read -r r ip; do [[ -n "$ip" ]] || continue; "$fn" "$r" "$ip" || rc=1; done <<< "$bes"
+    fi
+  fi
+  if [[ "$role" != be ]]; then
+    local fes; fes=$(nodes_for_role fe)
+    while read -r r ip; do [[ -n "$ip" ]] || continue; "$fn" "$r" "$ip" || rc=1; done <<< "$fes"
+  fi
   return $rc
 }
 
@@ -290,6 +349,9 @@ case "$cmd" in
       printf '  %s %-15s os=%-7s home=%s%s\n' "$r" "$ip" "$os" "$home" "$warn"
     done
     echo
+    be_cnt=$(nodes_for_role be | grep -c .); be_jobs=$(resolve_jobs "$be_cnt")
+    if (( be_jobs > 1 )); then echo "BE rollout: PARALLEL, up to $be_jobs of $be_cnt BE node(s) at once (FEs sequential)."
+    else echo "BE rollout: sequential (one at a time). Add --parallel or --jobs N to speed up a benchmark cluster."; fi
     echo "Apply with:  SR_PROFILE=${SR_PROFILE:-<name>} bash scripts/rollout.sh --conn '...' --ssh-user .. --ssh-pass .. --sudo apply${role:+ $role}"
     ;;
 
@@ -297,7 +359,10 @@ case "$cmd" in
     cl_need_fe
     out_check "$([[ "$role" == fe ]] && echo fe || { [[ "$role" == be ]] && echo be || echo 'fe be'; })"
     sr_log "FULL replacement from profile '${SR_PROFILE:-default}' output ($OUT) onto role=$role nodes."
-    confirm "About to stop, swap binaries on, and restart the cluster's $role node(s) — backups are taken first."
+    apply_be_jobs=$(resolve_jobs "$(nodes_for_role be | grep -c .)")
+    apply_note="About to stop, swap binaries on, and restart the cluster's $role node(s) — backups are taken first."
+    (( apply_be_jobs > 1 )) && apply_note="$apply_note  (BEs roll $apply_be_jobs-at-a-time in PARALLEL — they go down together briefly)."
+    confirm "$apply_note"
     for_each_node rollout_node
     rc=$?
     echo "── post-rollout status ──"

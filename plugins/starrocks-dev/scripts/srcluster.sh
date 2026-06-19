@@ -4,11 +4,13 @@
 #     source "$PLUGIN_ROOT/scripts/srlib.sh"
 #     source "$PLUGIN_ROOT/scripts/srcluster.sh"
 #
-# Connection model: the target cluster is reachable from the dev host (SR_HOST),
-# which acts as the jump. Every mysql / sshpass / curl runs ON the dev host via the
-# existing SSH ControlMaster. The cluster's own connection params are passed by the
-# caller per-invocation (a mysql connection string, --conn, or SR_CL_* env) — nothing
-# about the target cluster is persisted to disk.
+# Connection model: the target cluster is reachable from a JUMP host. By default the
+# jump is the dev host (SR_HOST, set by sr-connect); set SR_CL_JUMP (or --jump) to use
+# a DEDICATED bastion/jumpserver instead — e.g. for benchmark clusters that live behind
+# their own jump (see the sr-bench skill). Every mysql / sshpass / curl runs ON that
+# jump host via an SSH ControlMaster. The cluster's own connection params are passed by
+# the caller per-invocation (a mysql connection string, --conn, or SR_CL_* env, or a
+# named sr-bench entry) — nothing about the target cluster is persisted to disk here.
 #
 # Consumed globals (initialized here from SR_CL_*, then refined by cl_take_flag /
 # cl_finalize_params): FE PORT USER_ PASSWORD HTTP_PORT DB and, for node access,
@@ -20,6 +22,11 @@ PASSWORD="${SR_CL_PASSWORD:-}"; HTTP_PORT="${SR_CL_HTTP_PORT:-8030}"; DB="${SR_C
 CONN="${SR_CL_CONN:-}"
 SSH_USER="${SR_CL_SSH_USER:-}"; SSH_PASS="${SR_CL_SSH_PASS:-}"; SSH_KEY="${SR_CL_SSH_KEY:-}"
 SSH_PORT="${SR_CL_SSH_PORT:-22}"; SUDO="${SR_CL_SUDO:-}"
+# Optional DEDICATED jump (bastion). Empty => commands run on the dev host (SR_HOST),
+# the existing behavior. When set to 'user@host[:port]', mysql/ssh/curl run on THAT
+# host instead. Auth to the jump: a key (CL_JUMP_KEY) if given, else a password
+# (CL_JUMP_PASS, via sshpass — needs sshpass on the local machine), else agent/default.
+CL_JUMP="${SR_CL_JUMP:-}"; CL_JUMP_PASS="${SR_CL_JUMP_PASS:-}"; CL_JUMP_KEY="${SR_CL_JUMP_KEY:-}"
 
 # Explicit-flag holders so a flag wins over the --conn string regardless of order.
 F_FE=""; F_PORT=""; F_USER=""; F_PW=""; PW_SET=0; F_HTTP=""; F_DB=""
@@ -33,6 +40,8 @@ cl_take_flag() {
   CL_TAKEN=1
   case "$1" in
     --conn)      CONN="$2";      CL_SHIFT=2 ;;
+    --jump)      CL_JUMP="$2";   CL_SHIFT=2 ;;
+    --jump-key)  CL_JUMP_KEY="$2"; CL_SHIFT=2 ;;
     --fe)        F_FE="$2";      CL_SHIFT=2 ;;
     --port)      F_PORT="$2";    CL_SHIFT=2 ;;
     --user)      F_USER="$2";    CL_SHIFT=2 ;;
@@ -96,15 +105,47 @@ cl_finalize_params() {
   [[ -n "$F_DB" ]]     && DB="$F_DB"
 }
 
+# cl_jump_desc — human label for where commands run (dedicated jump or the dev host).
+cl_jump_desc() { if [[ -n "$CL_JUMP" ]]; then printf 'jump %s' "$CL_JUMP"; else printf 'dev host %s' "$(sr_target)"; fi; }
+
 cl_need_fe() {
-  [[ -n "$FE" ]] || sr_die "no cluster host — pass a connection string: --conn 'mysql -h <host> -P <port> -u <user> -p<pw>' (or SR_CL_CONN / --fe). The host must be reachable FROM the dev host $(sr_target)."
+  [[ -n "$FE" ]] || sr_die "no cluster host — pass a connection string: --conn 'mysql -h <host> -P <port> -u <user> -p<pw>' (or SR_CL_CONN / --fe). The host must be reachable FROM the $(cl_jump_desc)."
 }
 
 _b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
-# cl_hostrun "<cmd>" — execute an arbitrary command string ON the dev host. Shipped
+# _cl_jump_run "<cmd>" — run a command on the DEDICATED jump host (CL_JUMP), the same
+# way rsh runs it on the dev host: base64-wrapped, over a reused SSH ControlMaster (the
+# socket lives in $SR_CFG_BASE, shared with rsh's). CL_JUMP is 'user@host[:port]'. Auth
+# precedence: CL_JUMP_KEY (key, BatchMode) > CL_JUMP_PASS (sshpass) > agent/default key.
+_cl_jump_run() {
+  local spec="$CL_JUMP" user host hp port tgt
+  user="${spec%%@*}"; [[ "$user" == "$spec" ]] && user=""
+  hp="${spec#*@}"; host="${hp%%:*}"; port="${hp##*:}"; [[ "$port" == "$hp" ]] && port=22
+  [[ -n "$host" ]] || sr_die "invalid jump spec '$spec' (want user@host[:port])"
+  if [[ -n "$user" ]]; then tgt="$user@$host"; else tgt="$host"; fi
+  local opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=15
+    -o ControlMaster=auto -o "ControlPath=${SR_CFG_BASE:-$HOME/.config/starrocks_dev}/cm-%r@%h:%p"
+    -o ControlPersist=300 -p "$port")
+  local payload="echo $(_b64 "$1") | base64 -d | bash"
+  if [[ -n "$CL_JUMP_KEY" ]]; then
+    ssh -o BatchMode=yes "${opts[@]}" -i "$CL_JUMP_KEY" "$tgt" "$payload" </dev/null
+  elif [[ -n "$CL_JUMP_PASS" ]]; then
+    command -v sshpass >/dev/null 2>&1 \
+      || sr_die "sshpass not found locally — it's needed for password login to the jump $host. Install sshpass, or give the jump a key (SR_CL_JUMP_KEY)."
+    SSHPASS="$CL_JUMP_PASS" sshpass -e ssh "${opts[@]}" "$tgt" "$payload" </dev/null
+  else
+    ssh -o BatchMode=yes "${opts[@]}" "$tgt" "$payload" </dev/null
+  fi
+}
+
+# cl_hostrun "<cmd>" — execute an arbitrary command string ON the jump. Default jump is
+# the dev host (rsh → SR_HOST); a dedicated bastion (CL_JUMP) is used when set. Shipped
 # base64-encoded so any quoting / $() / pipes inside survive untouched.
-cl_hostrun() { rsh "echo $(_b64 "$1") | base64 -d | bash" </dev/null; }
+cl_hostrun() {
+  if [[ -n "$CL_JUMP" ]]; then _cl_jump_run "$1"
+  else rsh "echo $(_b64 "$1") | base64 -d | bash" </dev/null; fi
+}
 
 # cl_mysql "<SQL>" — run SQL on the cluster from the dev host. Password via MYSQL_PWD
 # (kept off the process command line) and base64-wrapped so any character is safe.
