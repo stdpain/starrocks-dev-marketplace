@@ -29,6 +29,15 @@ multi-node test/staging cluster reached *from* the dev host.)
   Alive is verified via SQL), then FEs. Each node: **stop → back up current lib/bin →
   push new lib/bin → start → health-check**. Conf / meta / storage / log are left
   untouched. Backups under `<home>/.sr-rollout-backup/<ts>` enable `rollback`.
+- **Ownership is preserved — never run the cluster as root.** With `--sudo` the extract
+  runs as root, so the swapped `lib`/`bin` land root-owned. After each push the skill
+  **chowns the swapped dirs back to the install dir's owner** (the service user) and
+  **clears any stale pid file**, then starts the service **as that owner** (`sudo -u`),
+  not as root. This matters because a root-owned `bin/{fe,be}.pid` makes the next restart
+  by the normal service user fail — FE: `pid file is already locked`, BE: `fail to create
+  pid file.` — which silently bricks the whole cluster on the next reboot. Do **not** ssh
+  in as root or hand-start FE/BE as root for the same reason; always operate as the
+  service user (the owner of the install dir).
 
 ## Connection & credentials (one-off, never stored)
 
@@ -83,3 +92,8 @@ SR_PROFILE=myfeat bash scripts/rollout.sh ... rollback      # restore each node'
 - **Install-dir detection** uses the running process (`/proc/<pid>/exe` for BE, `/proc/<pid>/cwd`+cmdline for FE). If a node's FE/BE isn't running, or detection misses, pass `--fe-home/--be-home`.
 - **Subdirs swapped:** BE → `lib bin www`; FE → `lib bin spark-dpp webroot` (present-only). This is a binary swap, **not** a StarRocks rolling-upgrade with version-compat gates — use it on dev/test clusters where the FE/BE versions you built are meant to run together.
 - **Verify after rollout** with sr-inspect (`explain`, `profile`, `logs <node> fe|be`).
+- **Recovering a cluster already poisoned by a root-run rollout** (install dir / `bin` /
+  `*.pid` owned by root → won't restart as the service user): on each node
+  `sudo chown -R <svc-user>: <home>` and `rm -f <home>/bin/{fe,be}.pid`, then start as the
+  service user. The current skill prevents this going forward, but pre-existing root-owned
+  trees from an earlier rollout still need this one-time fix.

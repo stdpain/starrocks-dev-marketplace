@@ -13,8 +13,8 @@
     {
       "name": "starrocks-dev",
       "source": "./plugins/starrocks-dev",
-      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, deploy/start a cluster, and inspect a live cluster for perf/correctness.",
-      "version": "1.0.0",
+      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, deploy/start a cluster, inspect a live cluster for perf/correctness, roll out binaries, and backport merged PRs to release branches (conflict-resolve + branch-image verify).",
+      "version": "1.0.1",
       "category": "devops",
       "author": {
         "name": "stdpain",

@@ -9,7 +9,7 @@ deploying, and debugging the StarRocks source tree that lives on that host
 
 ## The plugin: `starrocks-dev`
 
-Seven composable skills sharing one SSH connection layer
+Eight composable skills sharing one SSH connection layer
 (`plugins/starrocks-dev/scripts/srlib.sh`, plus `srcluster.sh` for live clusters):
 
 | Skill | Stage | What it does |
@@ -21,6 +21,7 @@ Seven composable skills sharing one SSH connection layer
 | **sr-diagnose** | triage / repro | From a crash/stack/issue: locate the source, check if it's a known/fixed issue, and if not reproduce it (ASan build → trigger → capture) with exact steps. |
 | **sr-inspect** | inspect | Connect to a **live** cluster through the dev host via a mysql connection string and inspect perf/correctness — SQL, EXPLAIN ANALYZE, query profiles, jstack/pstack/logs/sys on its nodes. |
 | **sr-rollout** | rollout | Full-replace a **live** cluster's FE/BE binaries with a worktree profile's `output/`, node by node — OS-matched, with backup/rollback and Alive health-checks. |
+| **sr-backport** | backport | Cherry-pick a merged PR onto a release branch in an isolated worktree, surface conflicts for Claude to resolve, then build + run related UTs on the **branch-matching** dev-env image (backport to 4.1 → 4.1 image). Stops at a verified local commit; you review & push. |
 
 Because these are **skills**, the usual way to use them is just to ask Claude in
 plain language — *"connect to my starrocks dev box and build the BE"*, *"start the
@@ -244,6 +245,30 @@ Build for the cluster's OS by pinning a matching image on the profile:
 
 ---
 
+### sr-backport
+
+Backport a **merged** PR onto a release branch: resolve the PR's merge commit
+(GitHub REST API), create an isolated worktree profile pinned to the **branch-matching
+dev-env image** (backport to `branch-4.1` → the 4.1 image), and cherry-pick. Conflicts
+are copied out for Claude to resolve, then pushed back and committed. `verify` builds
+the changed FE/BE on that image and runs related unit tests. **Nothing is pushed** —
+it stops at a verified local commit on `backport/<target>/pr-<N>` for you to review.
+
+```bash
+B=plugins/starrocks-dev/skills/sr-backport/scripts/backport.sh
+bash $B prepare --pr https://github.com/StarRocks/starrocks/pull/12345 --branch 4.1
+#   → profile bp-4.1-pr12345, image …/dev-env-ubuntu:branch-4.1; clean or "CONFLICTED: …"
+SR_PROFILE=bp-4.1-pr12345 bash $B pull  ./bp     # copy conflicted files out (Claude edits them)
+SR_PROFILE=bp-4.1-pr12345 bash $B resolve ./bp   # push back + git add (rejects leftover markers)
+SR_PROFILE=bp-4.1-pr12345 bash $B continue       # finish the cherry-pick
+SR_PROFILE=bp-4.1-pr12345 bash $B verify         # build changed FE/BE on the 4.1 image + related UTs
+SR_PROFILE=bp-4.1-pr12345 bash $B diff           # review, then push yourself
+```
+The image tag follows `SR_BP_IMAGE_TPL` (`{base}:{branch}` by default, or `{base}:{ver}`
+for registries tagged `…:4.1`); override per-run with `prepare --image <ref>`.
+
+---
+
 ## End-to-end examples
 
 **First-time setup + a BE change, deployed and tested**
@@ -304,6 +329,7 @@ plugins/starrocks-dev/
     ├── sr-deploy/    (deploy)
     ├── sr-diagnose/  (analyze, known, repro)
     ├── sr-inspect/   (diag)
-    └── sr-rollout/   (rollout)
+    ├── sr-rollout/   (rollout)
+    └── sr-backport/  (backport)
 ```
 Each skill's `SKILL.md` has the full option list, behavior notes, and triggers.

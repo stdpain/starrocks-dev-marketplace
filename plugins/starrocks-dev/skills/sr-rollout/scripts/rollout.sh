@@ -179,9 +179,29 @@ stop_node()  { local r="$1" home="$2" node="$3"
   if [[ "$r" == BE ]]; then cl_node_run "$node" "'$home/bin/stop_be.sh' 2>/dev/null || pkill -x starrocks_be || true"
   else                      cl_node_run "$node" "'$home/bin/stop_fe.sh' 2>/dev/null || pkill -f com.starrocks.StarRocksFE || true"; fi
 }
-start_node() { local r="$1" home="$2" node="$3"
-  if [[ "$r" == BE ]]; then cl_node_run "$node" "'$home/bin/start_be.sh' --daemon"
-  else                      cl_node_run "$node" "'$home/bin/start_fe.sh' --daemon"; fi
+# start_node <role> <home> <node> [owner] — start the service. When running under
+# --sudo we would otherwise start as root, which makes the freshly-swapped lib/bin and
+# the pid file root-owned; a later restart by the normal service user then fails with
+# "pid file is already locked" (FE) / "fail to create pid file." (BE). So when we know
+# the install dir's owner, drop to it (sudo -u <owner>) and start as that user instead.
+start_node() { local r="$1" home="$2" node="$3" owner="${4:-}"
+  local script; [[ "$r" == BE ]] && script="$home/bin/start_be.sh" || script="$home/bin/start_fe.sh"
+  local cmd="'$script' --daemon"
+  [[ -n "$SUDO" && -n "$owner" ]] && cmd="sudo -n -u '$owner' $cmd"
+  cl_node_run "$node" "$cmd"
+}
+
+# home_owner <node> <home> — echo the user that owns the install dir (the service user).
+home_owner() { cl_node_run "$1" "stat -c '%U' '$2' 2>/dev/null" 2>/dev/null | tr -d '[:space:]'; }
+
+# fix_ownership <node> <home> <owner> <dirs> — after a sudo extract the swapped dirs are
+# root-owned; chown them back to the service user and drop any stale (possibly root-owned)
+# pid file, so the install never ends up root-owned and restartable only by root.
+fix_ownership() {
+  local node="$1" home="$2" owner="$3"; shift 3; local dirs="$*"
+  [[ -n "$owner" ]] || return 0
+  local snip='home="'"$home"'"; for d in '"$dirs"'; do [ -e "$home/$d" ] && chown -R "'"$owner"':" "$home/$d" 2>/dev/null || true; done; rm -f "$home"/bin/*.pid 2>/dev/null || true; echo "    ownership restored to '"$owner"', stale pid cleared"'
+  cl_node_run "$node" "$snip"
 }
 
 # backup_node <home> <node> <dirs...> — copy current dirs into a fresh timestamped
@@ -201,8 +221,9 @@ rollout_node() {
   local r="$1" node="$2"
   local home; home=$(detect_home "$r" "$node")
   [[ -n "$home" ]] || { sr_log "  ! could not detect the $r install dir on $node — pass --$([[ $r == FE ]] && echo fe || echo be)-home <path>"; return 1; }
+  local owner; owner=$(home_owner "$node" "$home")
   local src dirs; if [[ "$r" == BE ]]; then src="$OUT/be"; dirs="${BE_DIRS[*]}"; else src="$OUT/fe"; dirs="${FE_DIRS[*]}"; fi
-  sr_log "▶ $r $node  (home=$home)"
+  sr_log "▶ $r $node  (home=$home, owner=${owner:-?})"
   backup_node "$home" "$node" $dirs
   stop_node "$r" "$home" "$node"
   local d
@@ -212,7 +233,8 @@ rollout_node() {
     sr_log "    push $d ..."
     cl_push_dir "$node" "$src" "$d" "$home" || { sr_log "    ! push $d failed"; return 1; }
   done
-  start_node "$r" "$home" "$node"
+  fix_ownership "$node" "$home" "$owner" $dirs
+  start_node "$r" "$home" "$node" "$owner"
   wait_alive "$r" "$node"
 }
 
@@ -220,13 +242,15 @@ rollback_node() {
   local r="$1" node="$2"
   local home; home=$(detect_home "$r" "$node")
   [[ -n "$home" ]] || { sr_log "  ! could not detect the $r install dir on $node — pass --$([[ $r == FE ]] && echo fe || echo be)-home <path>"; return 1; }
-  sr_log "↩ $r $node  (home=$home)"
+  local owner; owner=$(home_owner "$node" "$home")
+  sr_log "↩ $r $node  (home=$home, owner=${owner:-?})"
   local snip='set -e; home="'"$home"'"; bk=$(cat "$home/.sr-rollout-last-backup" 2>/dev/null || true)
 [ -n "$bk" ] && [ -d "$bk" ] || { echo "    no backup recorded for this node"; exit 9; }
 for d in "$bk"/*; do [ -e "$d" ] && cp -a "$d" "$home/"; done
 echo "    restored from $bk"'
   cl_node_run "$node" "$snip" || { sr_log "    ! rollback failed on $node"; return 1; }
-  stop_node "$r" "$home" "$node"; start_node "$r" "$home" "$node"; wait_alive "$r" "$node"
+  fix_ownership "$node" "$home" "$owner" "lib bin www spark-dpp webroot"
+  stop_node "$r" "$home" "$node"; start_node "$r" "$home" "$node" "$owner"; wait_alive "$r" "$node"
 }
 
 # run the cycle over BEs first (FE stays up to verify each), then FEs. Honors the
