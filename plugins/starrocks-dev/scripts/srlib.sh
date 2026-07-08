@@ -59,14 +59,23 @@ fi
 # time, so a profile created BEFORE these keys were added to the base would never
 # see them otherwise. SR_CCACHE / SR_CCACHE_SIZE describe ONE host-level shared
 # cache (namespaced per image), so they belong to the whole box, not a snapshot.
+# GUARD: only inherit when the profile targets the SAME dev host as the base. A
+# cross-host profile (created by `workspace.sh add-host`, reached THROUGH the main
+# host as a jump) lives on a different filesystem — the base's SR_CCACHE path is
+# meaningless there, and mounting it would point ccache at a bogus dir on the wrong
+# box. Such a profile keeps its own (or no) cache.
 if [[ -n "${SR_PROFILE:-}" && -f "$SR_CFG_BASE/config.env" ]]; then
-  for _gk in SR_CCACHE SR_CCACHE_SIZE; do
-    if [[ -z "${!_gk:-}" ]]; then
-      _gv=$(sed -n "s/^$_gk='\(.*\)'\$/\1/p" "$SR_CFG_BASE/config.env" | tail -1)
-      [[ -n "$_gv" ]] && printf -v "$_gk" '%s' "$_gv"
-    fi
-  done
-  unset _gk _gv
+  _base_host=$(sed -n "s/^SR_HOST='\(.*\)'\$/\1/p" "$SR_CFG_BASE/config.env" | tail -1)
+  if [[ -n "${SR_HOST:-}" && "${SR_HOST:-}" == "$_base_host" ]]; then
+    for _gk in SR_CCACHE SR_CCACHE_SIZE; do
+      if [[ -z "${!_gk:-}" ]]; then
+        _gv=$(sed -n "s/^$_gk='\(.*\)'\$/\1/p" "$SR_CFG_BASE/config.env" | tail -1)
+        [[ -n "$_gv" ]] && printf -v "$_gk" '%s' "$_gv"
+      fi
+    done
+    unset _gk _gv
+  fi
+  unset _base_host
 fi
 
 # Defaults (only applied if unset).

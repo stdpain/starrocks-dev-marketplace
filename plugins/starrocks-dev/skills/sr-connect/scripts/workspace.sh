@@ -36,6 +36,21 @@ usage: workspace.sh <command>
       --container <c>  container name        (default: sr-dev-<name>)
       --image <img>    dev-env image to pin  (default: inherit the base profile's SR_IMAGE)
       --deploy <dir>   deploy/run dir        (default: <base SR_DEPLOY_DIR>/<name>, else in-place)
+  add-host <name> --host <h> [opts]  register a SECOND dev host reached THROUGH the main
+                       one (the main dev host becomes the SSH jump). Unlike create, this
+                       does NOT make a git worktree — the second box has its own checkout.
+      --host <h>       secondary host (required; only reachable from the main dev host)
+      --user <u>       ssh user on the secondary   (default: the main host's SR_USER)
+      --port <p>       ssh port on the secondary   (default: 22)
+      --key <path>     local ssh key               (default: the main host's SR_KEY)
+      --jump <spec>    explicit ProxyJump override  (default: auto = main dev host,
+                       chained after the main host's own bastion if it has one)
+      --src <path>     StarRocks source path on the secondary (in-container path if --container)
+      --host-src <p>   host path of the source to mount (default: <secondary $HOME>/starrocks)
+      --container <c>  dev-env container name on the secondary (omit to build on the host)
+      --image <img>    dev-env image                (default: inherit the main host's SR_IMAGE)
+      --deploy <dir>   deploy/run dir on the secondary
+      --thirdparty <p> STARROCKS_THIRDPARTY path on the secondary, if non-default
   rm <name> [--keep-src] [--keep-container]
                        remove the profile config; also git-worktree-remove its source
                        and `docker rm -f` its container unless --keep-* is given
@@ -60,13 +75,22 @@ cmd_list() {
     echo "  (not configured — run setup.sh)"
   fi
   echo "── profiles ──"
-  local found=0 d name f
+  local found=0 d name f base_host phost pjump
+  base_host=$(cfg_get "$SR_CFG_BASE/config.env" SR_HOST)
   for d in "$PROFILES_DIR"/*/; do
     [[ -d "$d" ]] || continue
     f="$d/config.env"; [[ -f "$f" ]] || continue
     name=$(basename "$d"); found=1
-    printf '  %-16s docker=%s src=%s deploy=%s\n' "$name" \
-      "$(cfg_get "$f" SR_DOCKER)" "$(cfg_get "$f" SR_HOST_SRC)" "$(cfg_get "$f" SR_DEPLOY_DIR)"
+    phost=$(cfg_get "$f" SR_HOST)
+    if [[ -n "$phost" && "$phost" != "$base_host" ]]; then
+      # a SECOND dev host, reached through the main one — show host + jump, not a worktree.
+      pjump=$(cfg_get "$f" SR_PROXY_JUMP)
+      printf '  %-16s host=%s via=%s docker=%s src=%s\n' "$name" \
+        "$phost" "${pjump##*,}" "$(cfg_get "$f" SR_DOCKER)" "$(cfg_get "$f" SR_HOST_SRC)"
+    else
+      printf '  %-16s docker=%s src=%s deploy=%s\n' "$name" \
+        "$(cfg_get "$f" SR_DOCKER)" "$(cfg_get "$f" SR_HOST_SRC)" "$(cfg_get "$f" SR_DEPLOY_DIR)"
+    fi
   done
   [[ "$found" == 1 ]] || echo "  (none — create one with: workspace.sh create <name>)"
 }
@@ -172,6 +196,103 @@ Use it:
 EOF
 }
 
+cmd_add_host() {
+  local name="${1:-}"; shift || true
+  [[ -n "$name" ]] || usage
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || sr_die "invalid profile name '$name' (use letters, digits, . _ -)"
+  local host="" user="" port="" key="" src="" host_src="" container="" image="" deploy="" jump="" thirdparty=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)       host="$2"; shift 2 ;;
+      --user)       user="$2"; shift 2 ;;
+      --port)       port="$2"; shift 2 ;;
+      --key)        key="$2"; shift 2 ;;
+      --src)        src="$2"; shift 2 ;;
+      --host-src)   host_src="$2"; shift 2 ;;
+      --container)  container="$2"; shift 2 ;;
+      --image)      image="$2"; shift 2 ;;
+      --deploy)     deploy="$2"; shift 2 ;;
+      --jump)       jump="$2"; shift 2 ;;
+      --thirdparty) thirdparty="$2"; shift 2 ;;
+      *) sr_die "unknown option '$1'" ;;
+    esac
+  done
+
+  local cfg="$PROFILES_DIR/$name/config.env"
+  [[ -e "$cfg" ]] && sr_die "profile '$name' already exists ($cfg). Remove it first: workspace.sh rm $name"
+  [[ -n "$host" ]] || sr_die "add-host needs --host <secondary-host> (the box reached THROUGH the main dev host)."
+
+  # The base/default profile IS the main dev host — the jump we tunnel through.
+  local base_cfg="$SR_CFG_BASE/config.env"
+  [[ -f "$base_cfg" ]] || sr_die "no default config — run setup.sh for the MAIN dev host first; add-host uses it as the jump."
+  local base_host base_user base_port base_jump base_key base_image
+  base_host=$(cfg_get "$base_cfg" SR_HOST)
+  base_user=$(cfg_get "$base_cfg" SR_USER)
+  base_port=$(cfg_get "$base_cfg" SR_PORT)
+  base_jump=$(cfg_get "$base_cfg" SR_PROXY_JUMP)
+  base_key=$(cfg_get "$base_cfg" SR_KEY)
+  base_image=$(cfg_get "$base_cfg" SR_IMAGE)
+  [[ -n "$base_host" ]] || sr_die "default config has no SR_HOST — run setup.sh for the main dev host first."
+  [[ "$host" != "$base_host" ]] || sr_die "--host equals the main dev host ($host); that IS the default profile, not a second box."
+
+  # Compute the ProxyJump chain to reach the secondary box:
+  #   <main host's own bastion(s), if any> , <main host>
+  # ProxyJump hop format is user@host[:port]; :22 is left implicit.
+  if [[ -z "$jump" ]]; then
+    local main_hop="${base_user:+$base_user@}$base_host"
+    [[ -n "$base_port" && "$base_port" != "22" ]] && main_hop+=":$base_port"
+    jump="${base_jump:+$base_jump,}$main_hop"
+  fi
+
+  # Fresh, standalone config for the secondary box. A cross-host profile must NOT
+  # inherit the main host's source / caches / deploy paths (different filesystem);
+  # srlib already sourced those into the env, so clear them explicitly. We only
+  # borrow the image name (same StarRocks toolchain) and the SSH key (the local key
+  # is offered to both hops of the ProxyJump).
+  unset SR_M2 SR_CCACHE SR_HOST_SRC SR_DEPLOY_DIR SR_DOCKER SR_SRC SR_THIRDPARTY
+  SR_HOST="$host"
+  SR_USER="${user:-$base_user}"
+  SR_PORT="${port:-22}"
+  SR_KEY="${key:-$base_key}"
+  SR_PROXY_JUMP="$jump"
+  [[ -n "$src" ]]        && SR_SRC="$src"
+  [[ -n "$host_src" ]]   && SR_HOST_SRC="$host_src"
+  [[ -n "$container" ]]  && SR_DOCKER="$container"
+  [[ -n "$deploy" ]]     && SR_DEPLOY_DIR="$deploy"
+  [[ -n "$thirdparty" ]] && SR_THIRDPARTY="$thirdparty"
+  SR_IMAGE="${image:-$base_image}"
+  SR_AUTO_PORTS="${SR_AUTO_PORTS:-1}"   # auto-ports so a cluster here won't collide with others
+
+  mkdir -p "$PROFILES_DIR/$name"
+  sr_write_config "$cfg"
+  sr_log "wrote $cfg"
+  cat >&2 <<EOF
+starrocks-dev: profile '$name' registered — a SECOND dev host reached through the main one.
+  host      : ${SR_USER:+$SR_USER@}$SR_HOST${SR_PORT:+:$SR_PORT}
+  jump      : $SR_PROXY_JUMP   (SSH tunnels local -> main dev host -> $SR_HOST)
+  source    : ${SR_SRC:-<unset — pass --src, or SR_PROFILE=$name SR_SRC=… bash setup.sh>}${SR_HOST_SRC:+  (host path $SR_HOST_SRC)}
+  container : ${SR_DOCKER:-<none — builds directly on the host>}
+  image     : ${SR_IMAGE:-<inherited default>}
+  deploy    : ${SR_DEPLOY_DIR:-<in-place from output/>}
+EOF
+
+  # Best-effort connectivity check through the jump — a failure here does NOT undo
+  # the registration (the box may just be down; verify by hand and retry later).
+  unset SSH_OPTS   # force a rebuild from the SR_* just set above
+  sr_prime_known_hosts
+  sr_log "testing connection to $(sr_target) via jump $SR_PROXY_JUMP ..."
+  if out=$(sr_conn_test 2>/dev/null); then
+    sr_log "connected: $out"
+  else
+    sr_log "NOTE: could not connect yet — verify by hand once: ssh -J '$SR_PROXY_JUMP' $(sr_target)"
+  fi
+  cat >&2 <<EOF
+Use it:
+  SR_PROFILE=$name bash $PLUGIN_ROOT/skills/sr-connect/scripts/doctor.sh
+  SR_PROFILE=$name bash $PLUGIN_ROOT/skills/sr-build/scripts/build.sh
+EOF
+}
+
 cmd_rm() {
   local name="${1:-}"; shift || true
   [[ -n "$name" ]] || usage
@@ -186,10 +307,36 @@ cmd_rm() {
   local cfg="$PROFILES_DIR/$name/config.env"
   [[ -f "$cfg" ]] || sr_die "no such profile '$name' ($cfg not found)."
 
-  local container src img
+  local container src img phost
   container=$(cfg_get "$cfg" SR_DOCKER)
   src=$(cfg_get "$cfg" SR_HOST_SRC)
   img=$(cfg_get "$cfg" SR_IMAGE)
+  phost=$(cfg_get "$cfg" SR_HOST)
+
+  # A SECOND dev host (added via add-host) targets a different box, reached through
+  # the main one. Its container lives on THAT box and its source is an independent
+  # checkout — NOT a git worktree of the main tree. So: remove the container ON the
+  # secondary (retarget rsh at it), and never delete its source.
+  local base_host; base_host=$(cfg_get "$SR_CFG_BASE/config.env" SR_HOST)
+  if [[ -n "$phost" && "$phost" != "$base_host" ]]; then
+    if [[ "$keep_container" == 0 && -n "$container" ]]; then
+      sr_log "removing container $container on $phost (through the jump) ..."
+      SR_HOST="$phost"
+      SR_USER="$(cfg_get "$cfg" SR_USER)"
+      SR_PORT="$(cfg_get "$cfg" SR_PORT)"; SR_PORT="${SR_PORT:-22}"
+      SR_KEY="$(cfg_get "$cfg" SR_KEY)"
+      SR_PROXY_JUMP="$(cfg_get "$cfg" SR_PROXY_JUMP)"
+      unset SSH_OPTS   # rebuild for the secondary
+      rsh "docker rm -f '$container' >/dev/null 2>&1 || true"
+    fi
+    [[ "$keep_src" == 0 && -n "$src" ]] && \
+      sr_log "leaving source $src on $phost in place (independent checkout, not a worktree)."
+    rm -rf "$PROFILES_DIR/$name"
+    local rkept=""
+    [[ "$keep_container" == 1 ]] && rkept=" (kept container)"
+    sr_log "profile '$name' (second dev host $phost) removed.$rkept"
+    return 0
+  fi
 
   if [[ "$keep_container" == 0 && -n "$container" ]]; then
     sr_log "removing container $container ..."
@@ -226,7 +373,8 @@ cmd="${1:-list}"; shift || true
 case "$cmd" in
   list)   cmd_list ;;
   create) cmd_create "$@" ;;
+  add-host|addhost) cmd_add_host "$@" ;;
   rm|remove) cmd_rm "$@" ;;
   -h|--help|help) usage 0 ;;
-  *) sr_die "unknown command '$cmd' (use: list | create | rm)" ;;
+  *) sr_die "unknown command '$cmd' (use: list | create | add-host | rm)" ;;
 esac

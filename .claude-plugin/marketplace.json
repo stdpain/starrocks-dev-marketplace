@@ -5,7 +5,7 @@
     "email": "stdpain@gmail.com"
   },
   "metadata": {
-    "description": "Skills for remote StarRocks development over SSH: connection, build, test, deploy, crash diagnosis, live-cluster inspection & rollout, PR backport, benchmark-cluster management, and static bug-scan with fault-injection reproduction.",
+    "description": "Skills for remote StarRocks development over SSH: connection, build, test, deploy, crash diagnosis, live-cluster inspection & rollout, PR backport, benchmark-cluster management, static bug-scan with fault-injection reproduction, and red-CI-to-local-repro triage.",
     "version": "1.0.0",
     "pluginRoot": "./plugins"
   },
@@ -13,8 +13,8 @@
     {
       "name": "starrocks-dev",
       "source": "./plugins/starrocks-dev",
-      "description": "Drive a remote StarRocks dev host over SSH — set up the connection, build FE/BE, deploy/start a cluster, inspect a live cluster for perf/correctness, roll out binaries, backport merged PRs to release branches (conflict-resolve + branch-image verify), manage named benchmark/test clusters behind a jump host (connect + wake suspended FE/BE), and statically scan modules for bugs then reproduce them (SQLTest/failpoint/strace/eBPF/kernel fault injection) and record findings.",
-      "version": "1.2.0",
+      "description": "Drive a remote StarRocks dev host over SSH — set up the connection (incl. a second dev host reached through the main one as a jump), build FE/BE, deploy/start a cluster, inspect a live cluster for perf/correctness, roll out binaries, backport merged PRs to release branches (conflict-resolve + branch-image verify), manage named benchmark/test clusters behind a jump host (connect + wake suspended FE/BE), statically scan modules for bugs then reproduce them (SQLTest/failpoint/strace/eBPF/kernel fault injection), and bridge a red GitHub CI run to a local repro.",
+      "version": "1.3.0",
       "category": "devops",
       "author": {
         "name": "stdpain",

@@ -9,12 +9,12 @@ deploying, and debugging the StarRocks source tree that lives on that host
 
 ## The plugin: `starrocks-dev`
 
-Ten composable skills sharing one SSH connection layer
+Eleven composable skills sharing one SSH connection layer
 (`plugins/starrocks-dev/scripts/srlib.sh`, plus `srcluster.sh` for live clusters):
 
 | Skill | Stage | What it does |
 |-------|-------|--------------|
-| **sr-connect** | connection / env | Configure & verify SSH (direct or via jump host), bring up the Docker dev-env (pull image + mount source), check the remote toolchain/source, run ad-hoc remote commands. **Use first.** |
+| **sr-connect** | connection / env | Configure & verify SSH (direct or via jump host), bring up the Docker dev-env (pull image + mount source), check the remote toolchain/source, run ad-hoc remote commands. Profiles for parallel work — and for a **second dev host reached through the main one** as an SSH jump (`workspace.sh add-host`). **Use first.** |
 | **sr-build** | build | Compile FE (Maven) and BE (cmake) via `build.sh` — full, incremental, FE/BE-only, or a single module. |
 | **sr-test** | test | FE / BE / Java-ext unit tests and SQL regression tests; single-class, gtest-filter, or single-module runs. |
 | **sr-deploy** | deploy / run | Sync artifacts to a deploy dir, auto-pick free ports, start/stop/restart FE+BE, register the BE, run SQL to verify. |

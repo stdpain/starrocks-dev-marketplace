@@ -16,7 +16,9 @@ connection to a remote StarRocks dev host and confirms the remote is build-ready
   config to `~/.config/starrocks_dev/profiles/<name>/config.env`. Each profile is an
   independent task — its own container, source worktree, deploy dir and ports — so
   several features build/deploy in parallel. Leaving `SR_PROFILE` unset uses the
-  default config exactly as before. See **Parallel work** below.
+  default config exactly as before. See **Parallel work** below. A profile can also
+  be a **second dev host that isn't directly reachable** — `workspace.sh add-host`
+  registers it with the main dev host as its SSH jump (see that section).
 - SSH reuses a **ControlMaster** socket, so only the first command authenticates;
   the rest are instant for ~5 minutes.
 - Bastions are supported two ways: set `SR_PROXY_JUMP` (applied to ssh/scp/rsync as
@@ -159,6 +161,31 @@ Options: `--branch`, `--base`, `--src` (worktree host path; default
 git-worktree-removes the source and `docker rm -f`s the container unless
 `--keep-src` / `--keep-container` is passed. `.m2`/ccache are **shared** (the
 profile inherits `SR_M2`), so parallel builds reuse one cache.
+
+### `workspace.sh add-host` — register a SECOND dev host (through the main one)
+
+For a dev box that **can't be reached directly** — only from the main dev host —
+register it as a profile whose SSH **jump is the main dev host**:
+
+```bash
+bash scripts/workspace.sh add-host node2 --host be-node-2 \
+     --src /root/starrocks --container sr-dev-node2      # user/key/image inherited
+SR_PROFILE=node2 bash scripts/doctor.sh                  # verify (tunnels local -> main -> node2)
+SR_PROFILE=node2 bash ../../sr-build/scripts/build.sh    # every skill works via SR_PROFILE
+```
+
+Unlike `create`, this is **not** a same-host worktree — the second box has its own
+independent source checkout, so `add-host` makes no git worktree and inherits no
+main-host paths (source/deploy/`.m2`/ccache all live on a different filesystem). It
+only borrows the main host's `SR_USER`, `SR_KEY` and `SR_IMAGE` as defaults. The
+`SR_PROXY_JUMP` is computed automatically as `<main host's own bastion, if any>,<main
+host>`, so every skill's ssh/scp/rsync tunnels `local → main dev host → node2`.
+
+Options: `--host` (required), `--user`, `--port`, `--key`, `--jump` (override the
+auto jump), `--src` (source path on the box; in-container path when `--container`
+is set), `--host-src` (host path to mount), `--container`, `--image`, `--deploy`,
+`--thirdparty`. `list` shows these as `host=… via=<main host>`; `rm` removes the
+container **on the second box** and leaves its source untouched (it's not a worktree).
 
 ## Parallel work (build several features at once)
 
