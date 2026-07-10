@@ -97,6 +97,10 @@ SR_CCACHE_SIZE="${SR_CCACHE_SIZE:-80G}"
 #                      share one warm cache (different OS images stay isolated). Inherited
 #                      by every profile, so set it once on the base config.
 # SR_CCACHE_SIZE     — ccache max_size cap, PER dev-env image (default 80G).
+# SR_MOLD            — host path to a PREBUILT mold install prefix (dir holding bin/mold,
+#                      or a dir/binary — build.sh auto-locates the mold executable under it).
+#                      Mounted read-only at /opt/mold; build.sh (BE) adds it to PATH, exposes
+#                      ld.mold, and sets STARROCKS_LINKER=mold so the BE links with mold.
 # SR_DOCKER_RUN_OPTS — extra `docker run` opts, e.g. '--network host' or '-p 9030:9030'
 
 sr_log()  { printf 'starrocks-dev: %s\n' "$*" >&2; }
@@ -109,7 +113,7 @@ SR_CONFIG_KEYS=(
   # connection
   SR_HOST SR_USER SR_PORT SR_KEY SR_PROXY_JUMP SR_SRC
   # docker dev-env
-  SR_DOCKER SR_IMAGE SR_HOST_SRC SR_NOFILE SR_M2 SR_CCACHE SR_CCACHE_SIZE SR_DOCKER_RUN_OPTS
+  SR_DOCKER SR_IMAGE SR_HOST_SRC SR_NOFILE SR_M2 SR_CCACHE SR_CCACHE_SIZE SR_MOLD SR_DOCKER_RUN_OPTS
   # build
   SR_THIRDPARTY SR_JOBS SR_BUILD_TYPE
   # backport (sr-backport): dev-env image tag template per target branch
@@ -256,6 +260,10 @@ sr_ensure_docker() {
     fi
     local mounts="-v '$SR_HOST_SRC':'$SR_SRC'"
     [[ -n "${SR_M2:-}" ]] && mounts+=" -v '$SR_M2':/root/.m2"
+    # Prebuilt mold linker: mount the host install prefix read-only at /opt/mold.
+    # build.sh (BE) then puts it on PATH and sets STARROCKS_LINKER=mold so the BE
+    # links with mold instead of the default gold — a big win on link time.
+    [[ -n "${SR_MOLD:-}" ]] && mounts+=" -v '$SR_MOLD':/opt/mold:ro"
     # Shared ccache. The cache dir is namespaced by dev-env IMAGE (= toolchain/OS),
     # NOT by profile: every profile on the same image shares one warm cache, while
     # a different OS image lands in a separate dir so toolchains never cross-pollute.

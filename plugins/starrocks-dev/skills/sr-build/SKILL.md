@@ -82,6 +82,20 @@ is **not** the end — wait for the `build OK` line or the exit code.
   worktree (a different source path) still hits the cache another profile warmed on the
   same image — instead of recompiling cold. Without `SR_CCACHE`, each profile's container
   has its own empty cache.
+- Set `SR_MOLD` (host path to a **prebuilt mold** install prefix — the dir holding
+  `bin/mold`) to link the BE with mold instead of the default gold linker. The install
+  is bind-mounted read-only at `/opt/mold` when the container is created; for BE builds
+  the wrapper puts mold on `PATH`, exposes an `ld.mold` executable, and exports
+  `STARROCKS_LINKER=mold` so `be/CMakeLists.txt` emits `-fuse-ld=mold`. FE-only builds
+  skip it. Because the mount is added at **container creation** time (like `SR_CCACHE`/
+  `SR_M2`), a pre-existing container must be recreated to pick it up (`workspace.sh` for a
+  profile, or `docker rm` the container so the next build recreates it). To override the
+  linker for one build, pass `STARROCKS_LINKER=<x> bash scripts/build.sh --be`.
+  **Gotcha:** `build.sh` sources `$STARROCKS_HOME/custom_env.sh` (via `env.sh`) *after*
+  the wrapper sets `STARROCKS_LINKER`, so a line like `export STARROCKS_LINKER=""` in
+  `custom_env.sh` silently overrides `SR_MOLD` (cmake then prints `using linker:` empty
+  → default linker). If mold isn't taking effect, comment that line out. Verify with a
+  cheap `--configure-only` run and look for `-- using linker: mold`.
 
 ## Notes for the agent
 

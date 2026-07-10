@@ -48,13 +48,45 @@ if [[ "$be_targeted" == 1 ]]; then
     done'
 fi
 
+# Prebuilt mold linker. When SR_MOLD is set the install prefix is bind-mounted at
+# /opt/mold (see sr_ensure_docker). For a BE build, put mold's bin on PATH, make sure
+# an `ld.mold` executable exists there (what `-fuse-ld=mold` looks up), and export
+# STARROCKS_LINKER=mold so be/CMakeLists.txt emits `-fuse-ld=mold`.
+#
+# We resolve the linker on the HOST and set it EXPLICITLY in the container: the
+# dev-env image itself exports STARROCKS_LINKER=lld, so a container-side `:-mold`
+# default would never win. Setting SR_MOLD is an explicit opt-in to mold, so mold
+# is forced — unless the user overrides per-invocation with STARROCKS_LINKER=<x>.
+# FE-only builds skip this entirely.
+mold_prelude=""
+if [[ -n "${SR_MOLD:-}" && "$be_targeted" == 1 ]]; then
+  mold_linker="${STARROCKS_LINKER:-mold}"
+  mold_prelude="
+    mold_bin=
+    for c in /opt/mold/bin/mold /opt/mold/mold /opt/mold; do
+      [ -x \"\$c\" ] && [ -f \"\$c\" ] && { mold_bin=\"\$c\"; break; }
+    done
+    [ -z \"\$mold_bin\" ] && mold_bin=\$(find /opt/mold -maxdepth 4 -type f -name mold -perm -u+x 2>/dev/null | head -1)
+    if [ -n \"\$mold_bin\" ]; then
+      mold_dir=\$(dirname \"\$mold_bin\")
+      export PATH=\"\$mold_dir:\$PATH\"
+      # -fuse-ld=mold resolves an executable named ld.mold on PATH.
+      command -v ld.mold >/dev/null 2>&1 || ln -sf \"\$mold_bin\" \"\$mold_dir/ld.mold\" 2>/dev/null || ln -sf \"\$mold_bin\" /usr/local/bin/ld.mold 2>/dev/null || true
+      export STARROCKS_LINKER='$mold_linker'
+      echo \"starrocks-dev: BE linker = \$STARROCKS_LINKER (mold at \$mold_bin)\" >&2
+    else
+      echo \"starrocks-dev: WARNING SR_MOLD set but no mold binary found under /opt/mold — using default linker\" >&2
+    fi
+    "
+fi
+
 # Pass user args verbatim; quote each for the remote shell.
 passthru=""
 for a in "$@"; do passthru+=" $(printf '%q' "$a")"; done
 
-sr_log "building on $(sr_target) [BUILD_TYPE=$build_type -j$jobs]${SR_DOCKER:+ in container $SR_DOCKER}: ./build.sh${passthru}"
+sr_log "building on $(sr_target) [BUILD_TYPE=$build_type -j$jobs]${SR_DOCKER:+ in container $SR_DOCKER}${SR_MOLD:+ mold=$SR_MOLD}: ./build.sh${passthru}"
 
-rsrc "export BUILD_TYPE='$build_type'; ./build.sh -j $jobs${passthru}"
+rsrc "${mold_prelude}export BUILD_TYPE='$build_type'; ./build.sh -j $jobs${passthru}"
 rc=$?
 
 if [[ $rc -eq 0 ]]; then
